@@ -19,6 +19,7 @@ import {
   getDailyThemeName,
   getStageOpponent,
   msUntilNextUtcMidnight,
+  utcDayKey,
   type DiePiece,
 } from '../shared/daily.ts';
 import { getTurnView, parseFenBoard, type TurnView } from '../shared/engine.ts';
@@ -55,6 +56,13 @@ let activeLbPeriod: LeaderboardPeriod = 'day';
 let cachedLeaderboards: LeaderboardsBundle | null = null;
 let leaderboardLoadError = false;
 let runUpdateEpoch = 0;
+let serverClockOffsetMs = 0;
+let dayRolloverRefreshInFlight = false;
+let lastRenderedResetIn = '';
+
+function currentEstimatedServerNowMs(): number {
+  return Date.now() + serverClockOffsetMs;
+}
 
 async function init(): Promise<void> {
   setupLightDismissFallback();
@@ -86,7 +94,7 @@ async function init(): Promise<void> {
     if (sub) sub.textContent = 'Connection error — please reload post.';
   }
 
-  window.setInterval(updateClockDisplay, 250);
+  window.setInterval(tickLiveTimers, 250);
 }
 
 async function refreshDailyPreviewState(
@@ -96,8 +104,10 @@ async function refreshDailyPreviewState(
     `/${Endpoint.GetDailyState}?guestId=${encodeURIComponent(guestId)}`,
   );
   if (!dailyRsp.ok) return null;
-  dailyInfo = (await dailyRsp.json()) as GetDailyStateRsp;
-  return dailyInfo;
+  const info = (await dailyRsp.json()) as GetDailyStateRsp;
+  dailyInfo = info;
+  serverClockOffsetMs = info.serverNowMs - Date.now();
+  return info;
 }
 
 function setupControls(): void {
@@ -284,6 +294,10 @@ function applyRunUpdate(run: RunState, serverNowMs?: number): void {
   autoTimeoutTriggered = false;
   clockBasePerfMs = performance.now();
 
+  if (typeof serverNowMs === 'number') {
+    serverClockOffsetMs = serverNowMs - Date.now();
+  }
+
   if (run.activeGame) {
     const syncRefMs =
       typeof serverNowMs === 'number' ? serverNowMs : run.updatedAtMs;
@@ -308,12 +322,24 @@ function applyRunUpdate(run: RunState, serverNowMs?: number): void {
   renderAll();
 }
 
+function updateHeaderResetCountdown(run: RunState): void {
+  const headerSub = document.getElementById('header-sub');
+  if (!headerSub) return;
+  const diceSymbols = run.openingRoll
+    .map((d) => DIE_METADATA[d].symbol)
+    .join('');
+  const resetIn = formatUtcResetCountdown(
+    msUntilNextUtcMidnight(currentEstimatedServerNowMs()),
+  );
+  lastRenderedResetIn = resetIn;
+  headerSub.textContent = `Opening ${diceSymbols} · 3+2 · ${run.username} · Reset ${resetIn}`;
+}
+
 function renderAll(): void {
   if (!currentRun) return;
   const run = currentRun;
 
   const headerTitle = document.getElementById('header-title');
-  const headerSub = document.getElementById('header-sub');
   if (headerTitle) {
     const themeName =
       dailyInfo && dailyInfo.dayKey === run.dayKey
@@ -321,14 +347,7 @@ function renderAll(): void {
         : getDailyThemeName(run.openingRoll);
     headerTitle.textContent = `${themeName} · ${run.dayKey}`;
   }
-  if (headerSub) {
-    const diceSymbols = run.openingRoll
-      .map((d) => DIE_METADATA[d].symbol)
-      .join('');
-    const resetRefMs = dailyInfo?.serverNowMs ?? Date.now();
-    const resetIn = formatUtcResetCountdown(msUntilNextUtcMidnight(resetRefMs));
-    headerSub.textContent = `Opening ${diceSymbols} · 3+2 · ${run.username} · Reset ${resetIn}`;
-  }
+  updateHeaderResetCountdown(run);
 
   renderLadderStrip(run);
 
@@ -1141,6 +1160,37 @@ function renderLeaderboardTable(): void {
     tr.append(c1, c2, c3, c4);
     tbody.appendChild(tr);
   });
+}
+
+function tickLiveTimers(): void {
+  tickUtcResetBanner();
+  updateClockDisplay();
+}
+
+function tickUtcResetBanner(): void {
+  if (!currentRun) return;
+  const estimatedNowMs = currentEstimatedServerNowMs();
+  const nextLabel = formatUtcResetCountdown(
+    msUntilNextUtcMidnight(estimatedNowMs),
+  );
+  if (nextLabel !== lastRenderedResetIn) {
+    updateHeaderResetCountdown(currentRun);
+  }
+  if (
+    dailyInfo &&
+    utcDayKey(estimatedNowMs) !== dailyInfo.dayKey &&
+    !dayRolloverRefreshInFlight
+  ) {
+    dayRolloverRefreshInFlight = true;
+    void refreshDailyPreviewState()
+      .then(() => {
+        if (currentRun) updateHeaderResetCountdown(currentRun);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        dayRolloverRefreshInFlight = false;
+      });
+  }
 }
 
 function updateClockDisplay(): void {

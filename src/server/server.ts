@@ -726,7 +726,9 @@ async function commitStageWin(params: {
     ...cas.run,
     nextStageEpitaph,
     ...(dailyRank !== null ? { dailyRank } : {}),
-    ...(isNewDailyBest ? { isNewDailyBest: true } : {}),
+    ...(isNewDailyBest
+      ? { isNewDailyBest: true, achievedDailyBest: true }
+      : {}),
   };
   const metaCas = await dbSaveRunCas(enrichedRun, cas.run.revision);
   if (!metaCas.committed && !metaCas.run) {
@@ -929,12 +931,15 @@ async function enrichAndSaveFinishedRun(
   });
 
   const { dailyRank: _oldRank, ...rest } = finishedBase;
+  const earnedDailyBest = Boolean(
+    isNewDailyBest ||
+    finishedBase.isNewDailyBest ||
+    finishedBase.achievedDailyBest,
+  );
   const enriched: StoredRunState = {
     ...rest,
     ...(dailyRank !== null ? { dailyRank } : {}),
-    ...(isNewDailyBest || finishedBase.isNewDailyBest
-      ? { isNewDailyBest: true }
-      : {}),
+    ...(earnedDailyBest ? { isNewDailyBest: true } : {}),
     shareCardText,
   };
   const cas = await dbSaveRunCas(enriched, finishedBase.revision, {
