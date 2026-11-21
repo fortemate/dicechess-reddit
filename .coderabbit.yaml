@@ -1,0 +1,100 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# =============================================================================
+# CodeRabbit Configuration — Dice Chess Daily (Devvit Web)
+# =============================================================================
+# Public Devvit Web application running @fortemate/dicechess-engine.
+# Reviews are triggered manually with an "@coderabbitai review" comment.
+# =============================================================================
+
+language: en-US
+tone_instructions: >-
+  Be concise and specific. No praise and no summary of the diff. Skip style and
+  formatting, which Prettier owns. Say what breaks and how.
+
+reviews:
+  profile: assertive
+
+  high_level_summary: false
+  poem: false
+  collapse_walkthrough: true
+  review_status: false
+  sequence_diagrams: false
+  suggested_labels: false
+  suggested_reviewers: false
+  estimate_code_review_effort: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: false
+    drafts: false
+    base_branches:
+      - main
+
+  path_filters:
+    - '!dist/**'
+    - '!public/*.js*'
+    - '!node_modules/**'
+    - '!coverage/**'
+    - '!**/package-lock.json'
+    - '!LICENSE'
+    - '!licenses/**'
+
+  tools:
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: false
+    yamllint:
+      enabled: false
+    languagetool:
+      enabled: false
+
+  path_instructions:
+    - path: 'src/shared/**'
+      instructions: |
+        Pure TypeScript shared domain and API contracts (no DOM or Node globals).
+        - Dice Chess rules and legal turn generation come from @fortemate/dicechess-engine;
+          do not reimplement maximal dice consumption or move legality here.
+        - Daily Opening Roll (P + 2 dice) must apply deterministically per UTC day
+          (00:00 UTC boundary) for turn 1 of both White and Black.
+        - Tie-break ordering: higher wins, lower totalTurns, firstTry, earlier completedAtMs.
+
+    - path: 'src/server/**'
+      instructions: |
+        Devvit Web server bundled to CJS for the Devvit runtime.
+        - All state persists in Devvit Redis (@devvit/web/server); reject external HTTP fetch calls.
+        - Enforce single active attempt per user/run and validate submitted results server-side.
+        - Never expose secrets, private infrastructure, or raw user identifiers beyond platform context.
+
+    - path: 'src/client/**'
+      instructions: |
+        Browser WebView client (Custom Post Preview splash + expanded game).
+        - Clocks run on server timestamps during active games; closing the tab must not pause an
+          active game.
+        - Never ship private weights, opening books, or restricted third-party media.
+
+    - path: 'src/**/*.test.ts'
+      instructions: |
+        Node built-in test runner specs (node:test).
+        - Tests should isolate Devvit context via runWithContext and mock Redis cleanly.
+        - Verify behavior against @fortemate/dicechess-engine where rule outcomes are asserted.
+
+    - path: '.github/workflows/**'
+      instructions: |
+        This is a public repository: jobs run on GitHub-hosted runners only (never self-hosted).
+        Action versions use pinned SHA hashes, and pull_request_target workflows must never
+        check out or execute code from the pull request.
+
+    - path: '**/*.md'
+      instructions: |
+        English only. Keep Publication Boundary rules intact: no trained weights, opening books,
+        labelled corpora, production parameter values, or private infrastructure details.

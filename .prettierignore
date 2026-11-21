@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+package-lock.json
+public/*.js
+public/*.js.map
+AGENTS.md
+LICENSE

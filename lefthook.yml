@@ -1,0 +1,21 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: betterleaks
+      run: betterleaks git --pre-commit --redact --staged
+
+    - name: prettier
+      glob: '**.{ts,tsx,js,mjs,mts,json,md,css,html,yaml,yml}'
+      run:
+        npx prettier --write --ignore-unknown --no-error-on-unmatched-pattern
+        {staged_files}
+      stage_fixed: true
+
+    - name: workflow-yaml
+      glob: '.github/workflows/*.y*ml'
+      run: actionlint -shellcheck= {staged_files}
+
+pre-push:
+  jobs:
+    - name: prettier-all
+      run: npm run -s format:check

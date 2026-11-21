@@ -1,0 +1,192 @@
+export type DiePiece = 'P' | 'N' | 'B' | 'R' | 'Q' | 'K';
+
+export type DailyOpeningRoll = readonly [DiePiece, DiePiece, DiePiece];
+
+export type BossId =
+  'rolly' | 'grabby' | 'rampage' | 'prowla' | 'thinkle' | 'ashby';
+
+export interface BossCharacter {
+  readonly id: BossId;
+  readonly name: string;
+  readonly creature: string;
+  readonly stage: number;
+  readonly engineAlgorithm: string;
+  readonly summary: string;
+}
+
+export interface StageOpponent {
+  readonly stage: number;
+  readonly boss: BossCharacter;
+  readonly playerColor: 'w' | 'b';
+  readonly isAscended: boolean;
+  readonly ascensionTier: number;
+}
+
+export interface RunResult {
+  readonly wins: number;
+  readonly totalTurns: number;
+  readonly firstTry: boolean;
+  readonly completedAtMs: number;
+}
+
+/** 3+2 time control: 3 minutes base plus 2s increment after a complete turn. */
+export const INITIAL_CLOCK_MS = 180_000;
+export const INCREMENT_MS = 2_000;
+
+export const STANDARD_START_FEN =
+  'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+const DIE_FACES: readonly DiePiece[] = ['P', 'N', 'B', 'R', 'Q', 'K'];
+const DIE_ORDER: Record<DiePiece, number> = {
+  P: 1,
+  N: 2,
+  B: 3,
+  R: 4,
+  Q: 5,
+  K: 6,
+};
+
+export const GAUNTLET_LADDER: readonly BossCharacter[] = [
+  {
+    id: 'rolly',
+    name: 'Rolly',
+    creature: 'Forest Pixie',
+    stage: 1,
+    engineAlgorithm: 'checkmate-aware',
+    summary: 'Trusts the dice completely, but never misses an open King.',
+  },
+  {
+    id: 'grabby',
+    name: 'Grabby',
+    creature: 'Treasure Goblin',
+    stage: 2,
+    engineAlgorithm: 'greedy',
+    summary: 'Grabs the highest-value piece in reach without looking ahead.',
+  },
+  {
+    id: 'rampage',
+    name: 'Rampage',
+    creature: 'Little Imp',
+    stage: 3,
+    engineAlgorithm: 'aggressive',
+    summary: 'Charges pawns forward and relentlessly hunts your King.',
+  },
+  {
+    id: 'prowla',
+    name: 'Prowla',
+    creature: 'Cat Sorceress',
+    stage: 4,
+    engineAlgorithm: 'tactician-prowla',
+    summary: 'Waits for loose pieces and springs fast tactical traps.',
+  },
+  {
+    id: 'thinkle',
+    name: 'Thinkle',
+    creature: 'Star Wizard',
+    stage: 5,
+    engineAlgorithm: 'aggressive-book',
+    summary: 'Plays disciplined openings and calculates king-safety lines.',
+  },
+  {
+    id: 'ashby',
+    name: 'Ashby',
+    creature: 'Mountain Dragon',
+    stage: 6,
+    engineAlgorithm: 'tactician-ashby',
+    summary: 'Daily Boss — guards the summit with punishing tactical search.',
+  },
+];
+
+const ASCENDED_POOL: readonly BossCharacter[] = GAUNTLET_LADDER.slice(3);
+
+/** Returns the canonical YYYY-MM-DD day key using the 00:00 UTC boundary. */
+export function utcDayKey(nowMs: number = Date.now()): string {
+  return new Date(nowMs).toISOString().slice(0, 10);
+}
+
+/** Deterministic 32-bit FNV-1a hash for generating repeatable daily hooks. */
+function hashDayKey(dayKey: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < dayKey.length; i += 1) {
+    hash ^= dayKey.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Generates the community-shared Daily Opening Roll (`P + 2` dice).
+ * Turn 1 of both White and Black uses this pool to guarantee legal opening play.
+ */
+export function getDailyOpeningRoll(dayKey: string): DailyOpeningRoll {
+  const seed = hashDayKey(dayKey);
+  const second = DIE_FACES[seed % DIE_FACES.length] ?? 'N';
+  const third = DIE_FACES[(seed >>> 8) % DIE_FACES.length] ?? 'R';
+  const sorted = (['P', second, third] as DiePiece[]).sort(
+    (a, b) => DIE_ORDER[a] - DIE_ORDER[b],
+  );
+  return [sorted[0] ?? 'P', sorted[1] ?? 'P', sorted[2] ?? 'P'];
+}
+
+/** Formats a roll in DFEN case matching the active side (`w` uppercase, `b` lowercase). */
+export function formatRollForTurn(
+  roll: readonly DiePiece[],
+  activeColor: 'w' | 'b',
+): string {
+  const joined = roll.join('');
+  return activeColor === 'w' ? joined.toUpperCase() : joined.toLowerCase();
+}
+
+/** Attaches a Daily Opening Roll as the 7th DFEN field on a 6-field FEN. */
+export function withOpeningRollDfen(
+  baseFen: string,
+  roll: DailyOpeningRoll,
+): string {
+  const fields = baseFen.trim().split(/\s+/);
+  if (fields.length !== 6) {
+    throw new Error(`Expected 6-field FEN, received ${fields.length} fields`);
+  }
+  const activeColor = fields[1] === 'b' ? 'b' : 'w';
+  return `${fields.join(' ')} ${formatRollForTurn(roll, activeColor)}`;
+}
+
+/** Resolves the opponent and color assignment for a given 1-based gauntlet stage. */
+export function getStageOpponent(stage: number): StageOpponent {
+  if (!Number.isInteger(stage) || stage < 1) {
+    throw new Error(`Stage must be a positive integer, received ${stage}`);
+  }
+  const playerColor: 'w' | 'b' = stage % 2 === 1 ? 'w' : 'b';
+  if (stage <= GAUNTLET_LADDER.length) {
+    const boss = GAUNTLET_LADDER[stage - 1]!;
+    return {
+      stage,
+      boss,
+      playerColor,
+      isAscended: false,
+      ascensionTier: 0,
+    };
+  }
+  const offset = stage - GAUNTLET_LADDER.length - 1;
+  const boss = ASCENDED_POOL[offset % ASCENDED_POOL.length]!;
+  return {
+    stage,
+    boss,
+    playerColor,
+    isAscended: true,
+    ascensionTier: Math.floor(offset / ASCENDED_POOL.length) + 1,
+  };
+}
+
+/**
+ * Leaderboard ordering:
+ * 1. More Wins
+ * 2. Fewer total turns across winning games
+ * 3. First Try ⭐ bonus priority
+ * 4. Earlier completion timestamp
+ */
+export function compareRuns(a: RunResult, b: RunResult): number {
+  if (a.wins !== b.wins) return b.wins - a.wins;
+  if (a.totalTurns !== b.totalTurns) return a.totalTurns - b.totalTurns;
+  if (a.firstTry !== b.firstTry) return a.firstTry ? -1 : 1;
+  return a.completedAtMs - b.completedAtMs;
+}

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, maximum-scale=1, minimum-scale=1, user-scalable=no"
+    />
+    <title>Dice Chess Daily — Gauntlet</title>
+    <link rel="modulepreload" href="game.js" />
+    <style>
+      body {
+        margin: 0;
+        width: 100dvw;
+        height: 100dvh;
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        background: #141821;
+        color: #f3f5f8;
+      }
+      main {
+        display: grid;
+        gap: 0.75rem;
+        justify-items: center;
+        text-align: center;
+        padding: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Dice Chess Daily</h1>
+      <p id="gauntlet-status">Loading…</p>
+      <p id="stage-info"></p>
+    </main>
+    <script src="game.js" type="module"></script>
+  </body>
+</html>

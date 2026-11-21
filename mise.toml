@@ -1,0 +1,29 @@
+[tools]
+node = "24.22.1"
+"npm:npm" = "11.19.1"
+lefthook = "2.1.14"
+betterleaks = "1.8.1"
+actionlint = "1.7.12"
+
+[settings]
+activate_aggressive = true
+
+[tasks.setup]
+description = "Install npm dependencies and register Git hooks"
+run = ["npm ci", "lefthook install"]
+
+[tasks.check]
+description = "Run format check, typecheck, unit tests, and build"
+run = "npm run check"
+
+[tasks.test]
+description = "Run unit tests"
+run = "npm test"
+
+[tasks.format]
+description = "Format repository files with Prettier"
+run = "npm run format"
+
+[tasks.build]
+description = "Build Devvit Web client and server bundles"
+run = "npm run build"
