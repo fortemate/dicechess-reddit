@@ -23,6 +23,7 @@ import {
 } from '../shared/api.ts';
 import {
   GAUNTLET_LADDER,
+  getCommunityHuntStatus,
   getDailyOpeningRoll,
   getDailyThemeName,
   getStageOpponent,
@@ -51,6 +52,7 @@ import {
   dbGetCommunityHuntCount,
   dbGetCurrentRunId,
   dbGetLeaderboards,
+  dbGetNextRival,
   dbGetRunById,
   dbGetStageEpitaph,
   dbGetStageEpitaphs,
@@ -59,7 +61,6 @@ import {
   dbRecordStageAttempt,
   dbRecordStageDeath,
   dbSaveRunCas,
-  DEFAULT_HUNT_TARGET,
   resolvePlayerIdentity,
   toPublicRunState,
   type PlayerIdentity,
@@ -210,13 +211,29 @@ async function routeGetDailyState(
     ? await syncClockExpiration(existingRun, deps)
     : null;
 
-  const [communityHuntCount, leaderboards, stageEpitaphs, attemptsToday] =
-    await Promise.all([
-      dbGetCommunityHuntCount(dayKey),
-      dbGetLeaderboards(nowMs, identity.playerKey),
-      dbGetStageEpitaphs(dayKey),
-      dbGetAttemptCount(dayKey, identity.playerKey),
-    ]);
+  const progressForRival =
+    syncedRun && syncedRun.status !== 'finished'
+      ? {
+          wins: syncedRun.wins,
+          totalTurns: syncedRun.totalTurns,
+          firstTry: syncedRun.firstTry,
+        }
+      : undefined;
+
+  const [
+    communityHuntCount,
+    leaderboards,
+    stageEpitaphs,
+    attemptsToday,
+    rivalTarget,
+  ] = await Promise.all([
+    dbGetCommunityHuntCount(dayKey),
+    dbGetLeaderboards(nowMs, identity.playerKey),
+    dbGetStageEpitaphs(dayKey),
+    dbGetAttemptCount(dayKey, identity.playerKey),
+    dbGetNextRival(dayKey, identity.playerKey, progressForRival),
+  ]);
+  const hunt = getCommunityHuntStatus(communityHuntCount);
 
   return {
     serverNowMs: deps.now(),
@@ -226,14 +243,18 @@ async function routeGetDailyState(
     dailyBoss,
     initialClockMs: INITIAL_CLOCK_MS,
     incrementMs: INCREMENT_MS,
-    communityHuntCount,
-    communityHuntTarget: DEFAULT_HUNT_TARGET,
+    communityHuntCount: hunt.count,
+    communityHuntTarget: hunt.target,
+    communityHuntBadge: hunt.badgeLabel,
+    rivalTarget,
     topLeaders: leaderboards.day.slice(0, 3),
     stageEpitaphs,
     playerUsername: identity.username,
     isGuest: identity.isGuest,
     attemptsToday,
-    activeRun: syncedRun ? toPublicRunState(syncedRun) : null,
+    activeRun: syncedRun
+      ? await toPublicRunWithRival(syncedRun, rivalTarget)
+      : null,
   };
 }
 
@@ -295,7 +316,7 @@ async function routeStartRun(
     await dbRecordStageAttempt(claim.run.dayKey, claim.run.currentStage);
     return {
       serverNowMs: deps.now(),
-      run: toPublicRunState(claim.run),
+      run: await toPublicRunWithRival(claim.run),
       resumed: false,
     };
   }
@@ -304,7 +325,7 @@ async function routeStartRun(
   if (synced.status !== 'paused_between_games') {
     return {
       serverNowMs: deps.now(),
-      run: toPublicRunState(synced),
+      run: await toPublicRunWithRival(synced),
       resumed: true,
     };
   }
@@ -315,7 +336,7 @@ async function routeStartRun(
     if (cas.run) {
       return {
         serverNowMs: deps.now(),
-        run: toPublicRunState(cas.run),
+        run: await toPublicRunWithRival(cas.run),
         resumed: true,
       };
     }
@@ -324,7 +345,7 @@ async function routeStartRun(
   await dbRecordStageAttempt(cas.run.dayKey, cas.run.currentStage);
   return {
     serverNowMs: deps.now(),
-    run: toPublicRunState(cas.run),
+    run: await toPublicRunWithRival(cas.run),
     resumed: true,
   };
 }
@@ -390,7 +411,7 @@ function prepareStageLaunch(
     botLine,
   };
 
-  const { nextStageEpitaph: _dropped, ...rest } = run;
+  const { nextStageEpitaph: _dropped, isNewDailyBest: _oldBest, ...rest } = run;
   return {
     ...rest,
     status: 'in_game',
@@ -441,7 +462,9 @@ async function routeSubmitTurn(
       'timeout',
       deps,
     );
-    const huntCount = await dbGetCommunityHuntCount(run.dayKey);
+    const hunt = getCommunityHuntStatus(
+      await dbGetCommunityHuntCount(run.dayKey),
+    );
     return {
       serverNowMs: deps.now(),
       run: toPublicRunState(expiredRun),
@@ -449,8 +472,9 @@ async function routeSubmitTurn(
       lastBotMoves: [],
       stageOutcome: 'loss',
       outcomeReason: 'timeout',
-      communityHuntCount: huntCount,
-      communityHuntTarget: DEFAULT_HUNT_TARGET,
+      communityHuntCount: hunt.count,
+      communityHuntTarget: hunt.target,
+      communityHuntBadge: hunt.badgeLabel,
     };
   }
 
@@ -560,15 +584,18 @@ async function routeSubmitTurn(
     );
   }
 
-  const communityHuntCount = await dbGetCommunityHuntCount(run.dayKey);
+  const hunt = getCommunityHuntStatus(
+    await dbGetCommunityHuntCount(run.dayKey),
+  );
   return {
     serverNowMs: deps.now(),
-    run: toPublicRunState(cas.run),
+    run: await toPublicRunWithRival(cas.run),
     lastPlayerMoves: req.moves,
     lastBotMoves: botMoves,
     ...(botLine ? { botLine } : {}),
-    communityHuntCount,
-    communityHuntTarget: DEFAULT_HUNT_TARGET,
+    communityHuntCount: hunt.count,
+    communityHuntTarget: hunt.target,
+    communityHuntBadge: hunt.badgeLabel,
   };
 }
 
@@ -622,6 +649,9 @@ async function handleStageTerminal(
     terminalResult.reason,
     deps,
   );
+  const hunt = getCommunityHuntStatus(
+    await dbGetCommunityHuntCount(run.dayKey),
+  );
   return {
     serverNowMs: deps.now(),
     run: toPublicRunState(finishedRun),
@@ -630,8 +660,9 @@ async function handleStageTerminal(
     botLine,
     stageOutcome: 'loss',
     outcomeReason: terminalResult.reason,
-    communityHuntCount: await dbGetCommunityHuntCount(run.dayKey),
-    communityHuntTarget: DEFAULT_HUNT_TARGET,
+    communityHuntCount: hunt.count,
+    communityHuntTarget: hunt.target,
+    communityHuntBadge: hunt.badgeLabel,
   };
 }
 
@@ -675,17 +706,18 @@ async function commitStageWin(params: {
     );
   }
 
-  let communityHuntCount = await dbGetCommunityHuntCount(cas.run.dayKey);
+  let rawHuntCount = await dbGetCommunityHuntCount(cas.run.dayKey);
   if (activeGame.stage === 6) {
-    const hunt = await dbRecordCommunityHuntWin(
+    const huntRes = await dbRecordCommunityHuntWin(
       cas.run.dayKey,
       cas.run.playerKey,
       cas.run.isGuest,
     );
-    communityHuntCount = hunt.count;
+    rawHuntCount = huntRes.count;
   }
+  const hunt = getCommunityHuntStatus(rawHuntCount);
 
-  const [{ dailyRank }, nextStageEpitaph] = await Promise.all([
+  const [{ dailyRank, isNewDailyBest }, nextStageEpitaph] = await Promise.all([
     dbRecordLeaderboardRun(cas.run, nowMs),
     dbGetStageEpitaph(cas.run.dayKey, nextStage),
   ]);
@@ -694,6 +726,7 @@ async function commitStageWin(params: {
     ...cas.run,
     nextStageEpitaph,
     ...(dailyRank !== null ? { dailyRank } : {}),
+    ...(isNewDailyBest ? { isNewDailyBest: true } : {}),
   };
   const metaCas = await dbSaveRunCas(enrichedRun, cas.run.revision);
   if (!metaCas.committed && !metaCas.run) {
@@ -713,14 +746,15 @@ async function commitStageWin(params: {
 
   return {
     serverNowMs: deps.now(),
-    run: toPublicRunState(finalRun),
+    run: await toPublicRunWithRival(finalRun),
     lastPlayerMoves: params.lastPlayerMoves,
     lastBotMoves: params.lastBotMoves,
     botLine,
     stageOutcome: 'win',
     outcomeReason: params.reason,
-    communityHuntCount,
-    communityHuntTarget: DEFAULT_HUNT_TARGET,
+    communityHuntCount: hunt.count,
+    communityHuntTarget: hunt.target,
+    communityHuntBadge: hunt.badgeLabel,
   };
 }
 
@@ -759,10 +793,11 @@ async function commitStageDraw(params: {
     );
   }
 
-  const [nextStageEpitaph, huntCount] = await Promise.all([
+  const [nextStageEpitaph, rawHuntCount] = await Promise.all([
     dbGetStageEpitaph(cas.run.dayKey, activeGame.stage),
     dbGetCommunityHuntCount(cas.run.dayKey),
   ]);
+  const hunt = getCommunityHuntStatus(rawHuntCount);
   const enrichedRun: StoredRunState = { ...cas.run, nextStageEpitaph };
   const metaCas = await dbSaveRunCas(enrichedRun, cas.run.revision);
   if (!metaCas.committed && !metaCas.run) {
@@ -782,14 +817,15 @@ async function commitStageDraw(params: {
 
   return {
     serverNowMs: deps.now(),
-    run: toPublicRunState(finalRun),
+    run: await toPublicRunWithRival(finalRun),
     lastPlayerMoves: params.lastPlayerMoves,
     lastBotMoves: params.lastBotMoves,
     botLine,
     stageOutcome: 'draw',
     outcomeReason: params.reason,
-    communityHuntCount: huntCount,
-    communityHuntTarget: DEFAULT_HUNT_TARGET,
+    communityHuntCount: hunt.count,
+    communityHuntTarget: hunt.target,
+    communityHuntBadge: hunt.badgeLabel,
   };
 }
 
@@ -873,7 +909,7 @@ async function enrichAndSaveFinishedRun(
   finishedBase: StoredRunState,
   completedAtMs: number,
 ): Promise<StoredRunState> {
-  const { dailyRank } = await dbRecordLeaderboardRun(
+  const { dailyRank, isNewDailyBest } = await dbRecordLeaderboardRun(
     finishedBase,
     completedAtMs,
   );
@@ -896,12 +932,37 @@ async function enrichAndSaveFinishedRun(
   const enriched: StoredRunState = {
     ...rest,
     ...(dailyRank !== null ? { dailyRank } : {}),
+    ...(isNewDailyBest || finishedBase.isNewDailyBest
+      ? { isNewDailyBest: true }
+      : {}),
     shareCardText,
   };
   const cas = await dbSaveRunCas(enriched, finishedBase.revision, {
     allowAlreadyFinished: true,
   });
   return cas.committed && cas.run ? cas.run : enriched;
+}
+
+async function toPublicRunWithRival(
+  run: StoredRunState,
+  precomputedRival?: Awaited<ReturnType<typeof dbGetNextRival>>,
+): Promise<ReturnType<typeof toPublicRunState>> {
+  const publicRun = toPublicRunState(run);
+  if (run.status === 'finished') {
+    return publicRun;
+  }
+  const rivalTarget =
+    precomputedRival !== undefined
+      ? precomputedRival
+      : await dbGetNextRival(run.dayKey, run.playerKey, {
+          wins: run.wins,
+          totalTurns: run.totalTurns,
+          firstTry: run.firstTry,
+        });
+  return {
+    ...publicRun,
+    rivalTarget,
+  };
 }
 
 async function syncClockExpiration(

@@ -2,6 +2,7 @@ import { redis } from '@devvit/web/server';
 import type {
   LeaderboardEntry,
   LeaderboardsBundle,
+  RivalTarget,
   RunState,
   StageEpitaph,
 } from '../shared/api.ts';
@@ -11,6 +12,7 @@ import {
   GAUNTLET_LADDER,
   getStageOpponent,
   type BossId,
+  type RunResult,
 } from '../shared/daily.ts';
 
 export const DEFAULT_HUNT_TARGET = 10;
@@ -341,12 +343,15 @@ export async function dbGetStageEpitaphs(
 /**
  * Atomically records a run across the day/week/month/year leaderboards matching
  * `run.dayKey`. Returns `dailyRank` only when this run matches or holds the player's
- * best daily leaderboard entry (never reusing an earlier better run's rank).
+ * best daily leaderboard entry, and `isNewDailyBest` when it improves or sets a winning record.
  */
 export async function dbRecordLeaderboardRun(
   run: StoredRunState,
   nowMs: number,
-): Promise<{ readonly dailyRank: number | null }> {
+): Promise<{
+  readonly dailyRank: number | null;
+  readonly isNewDailyBest: boolean;
+}> {
   const completedAtMs = run.completedAtMs ?? nowMs;
   const isFinished = run.status === 'finished';
   const candidate: StoredLeaderboardEntry = {
@@ -389,12 +394,92 @@ export async function dbRecordLeaderboardRun(
   ]);
 
   if (!dailyOutcome.matchedCandidate) {
-    return { dailyRank: null };
+    return { dailyRank: null, isNewDailyBest: false };
   }
   const idx = dailyOutcome.entries.findIndex(
     (entry) => entry.playerKey === candidate.playerKey,
   );
-  return { dailyRank: idx >= 0 ? idx + 1 : null };
+  return {
+    dailyRank: idx >= 0 ? idx + 1 : null,
+    isNewDailyBest: dailyOutcome.isNewBest,
+  };
+}
+
+/**
+ * Resolves the nearest asynchronous rival ahead of the viewer on today's leaderboard.
+ * Returns `null` if no other player sits ahead of the viewer.
+ */
+export async function dbGetNextRival(
+  dayKey: string,
+  viewerPlayerKey: string,
+  viewerProgress?: {
+    readonly wins: number;
+    readonly totalTurns: number;
+    readonly firstTry: boolean;
+  },
+): Promise<RivalTarget | null> {
+  const entries = await readLeaderboard(leaderboardKey('day', dayKey));
+  return selectRivalTarget(entries, viewerPlayerKey, viewerProgress);
+}
+
+function selectRivalTarget(
+  entries: readonly StoredLeaderboardEntry[],
+  viewerPlayerKey: string,
+  viewerProgress?: {
+    readonly wins: number;
+    readonly totalTurns: number;
+    readonly firstTry: boolean;
+  },
+): RivalTarget | null {
+  const rankedOthers = entries
+    .map((entry, idx) => ({ entry, rank: idx + 1 }))
+    .filter(({ entry }) => entry.playerKey !== viewerPlayerKey);
+  if (rankedOthers.length === 0) return null;
+
+  const benchmark = resolveViewerBenchmark(
+    entries,
+    viewerPlayerKey,
+    viewerProgress,
+  );
+  let chosen: { entry: StoredLeaderboardEntry; rank: number } | undefined;
+  if (benchmark) {
+    const ahead = rankedOthers.filter(
+      ({ entry }) => compareRuns(entry, benchmark) < 0,
+    );
+    chosen = ahead.at(-1);
+  } else {
+    const introCandidates = rankedOthers.slice(0, 3);
+    chosen = introCandidates.at(-1);
+  }
+  if (!chosen) return null;
+
+  return {
+    rank: chosen.rank,
+    username: chosen.entry.username,
+    wins: chosen.entry.wins,
+    totalTurns: chosen.entry.totalTurns,
+    firstTry: chosen.entry.firstTry,
+    targetStage: Math.min(6, Math.max(1, chosen.entry.wins + 1)),
+  };
+}
+
+function resolveViewerBenchmark(
+  entries: readonly StoredLeaderboardEntry[],
+  viewerPlayerKey: string,
+  viewerProgress?: {
+    readonly wins: number;
+    readonly totalTurns: number;
+    readonly firstTry: boolean;
+  },
+): RunResult | null {
+  if (viewerProgress) {
+    return {
+      ...viewerProgress,
+      completedAtMs: Number.MAX_SAFE_INTEGER,
+    };
+  }
+  const existing = entries.find((entry) => entry.playerKey === viewerPlayerKey);
+  return existing ?? null;
 }
 
 export async function dbGetLeaderboards(
@@ -474,17 +559,49 @@ async function readLeaderboard(key: string): Promise<StoredLeaderboardEntry[]> {
   }
 }
 
-type LeaderboardMergeResult =
-  | {
-      readonly changed: false;
-      readonly entries: StoredLeaderboardEntry[];
-      readonly matchedCandidate: boolean;
+type LeaderboardMergeResult = {
+  readonly changed: boolean;
+  readonly entries: StoredLeaderboardEntry[];
+  readonly matchedCandidate: boolean;
+  readonly isNewBest: boolean;
+};
+
+function mergeExistingLeaderboardEntry(
+  list: StoredLeaderboardEntry[],
+  existingIdx: number,
+  candidate: StoredLeaderboardEntry,
+  isFinished: boolean,
+): LeaderboardMergeResult | null {
+  const existing = list[existingIdx]!;
+  const sameRun =
+    existing.runId !== undefined && existing.runId === candidate.runId;
+  if (compareRuns(candidate, existing) >= 0) {
+    const needsTimestamp =
+      sameRun &&
+      isFinished &&
+      existing.completedAtMs !== candidate.completedAtMs;
+    const needsStage = sameRun && existing.maxStage < candidate.maxStage;
+    if (!needsTimestamp && !needsStage) {
+      return {
+        changed: false,
+        entries: list,
+        matchedCandidate: sameRun,
+        isNewBest: false,
+      };
     }
-  | {
-      readonly changed: true;
-      readonly entries: StoredLeaderboardEntry[];
-      readonly matchedCandidate: boolean;
+    list[existingIdx] = {
+      ...existing,
+      maxStage: Math.max(existing.maxStage, candidate.maxStage),
+      completedAtMs: needsTimestamp
+        ? candidate.completedAtMs
+        : existing.completedAtMs,
     };
+    return null;
+  }
+
+  list[existingIdx] = candidate;
+  return null;
+}
 
 function mergeLeaderboardEntry(
   list: StoredLeaderboardEntry[],
@@ -494,31 +611,20 @@ function mergeLeaderboardEntry(
   const existingIdx = list.findIndex(
     (entry) => entry.playerKey === candidate.playerKey,
   );
-  if (existingIdx < 0) {
-    list.push(candidate);
-  } else {
+  let isNewBest = candidate.wins > 0;
+
+  if (existingIdx >= 0) {
     const existing = list[existingIdx]!;
-    const sameRun =
-      existing.runId !== undefined && existing.runId === candidate.runId;
-    if (compareRuns(candidate, existing) >= 0) {
-      const needsTimestamp =
-        sameRun &&
-        isFinished &&
-        existing.completedAtMs !== candidate.completedAtMs;
-      const needsStage = sameRun && existing.maxStage < candidate.maxStage;
-      if (!needsTimestamp && !needsStage) {
-        return { changed: false, entries: list, matchedCandidate: sameRun };
-      }
-      list[existingIdx] = {
-        ...existing,
-        maxStage: Math.max(existing.maxStage, candidate.maxStage),
-        completedAtMs: needsTimestamp
-          ? candidate.completedAtMs
-          : existing.completedAtMs,
-      };
-    } else {
-      list[existingIdx] = candidate;
-    }
+    isNewBest = candidate.wins > 0 && compareRuns(candidate, existing) < 0;
+    const shortCircuit = mergeExistingLeaderboardEntry(
+      list,
+      existingIdx,
+      candidate,
+      isFinished,
+    );
+    if (shortCircuit) return shortCircuit;
+  } else {
+    list.push(candidate);
   }
 
   list.sort(compareRuns);
@@ -530,6 +636,7 @@ function mergeLeaderboardEntry(
     changed: true,
     entries: trimmed,
     matchedCandidate: stillIncluded,
+    isNewBest,
   };
 }
 
@@ -540,6 +647,7 @@ async function tryUpsertPeriodLeaderboardOnce(
 ): Promise<{
   readonly entries: StoredLeaderboardEntry[];
   readonly matchedCandidate: boolean;
+  readonly isNewBest: boolean;
 } | null> {
   const txn = await redis.watch(key);
   const list = await readLeaderboard(key);
@@ -549,6 +657,7 @@ async function tryUpsertPeriodLeaderboardOnce(
     return {
       entries: merged.entries,
       matchedCandidate: merged.matchedCandidate,
+      isNewBest: false,
     };
   }
   const written = await executeWatchedSet(
@@ -557,7 +666,11 @@ async function tryUpsertPeriodLeaderboardOnce(
     JSON.stringify(merged.entries),
   );
   return written
-    ? { entries: merged.entries, matchedCandidate: merged.matchedCandidate }
+    ? {
+        entries: merged.entries,
+        matchedCandidate: merged.matchedCandidate,
+        isNewBest: merged.isNewBest,
+      }
     : null;
 }
 
@@ -569,6 +682,7 @@ async function upsertPeriodLeaderboard(
 ): Promise<{
   readonly entries: StoredLeaderboardEntry[];
   readonly matchedCandidate: boolean;
+  readonly isNewBest: boolean;
 }> {
   if (remainingAttempts <= 0) {
     throw new Error(

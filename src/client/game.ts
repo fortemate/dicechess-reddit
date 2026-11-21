@@ -5,6 +5,7 @@ import {
   type LeaderboardsBundle,
   type PauseRunRsp,
   type ResignRunRsp,
+  type RivalTarget,
   type RunState,
   type ShareCommentRsp,
   type StageEpitaph,
@@ -13,9 +14,11 @@ import {
 } from '../shared/api.ts';
 import {
   DIE_METADATA,
+  formatUtcResetCountdown,
   GAUNTLET_LADDER,
   getDailyThemeName,
   getStageOpponent,
+  msUntilNextUtcMidnight,
   type DiePiece,
 } from '../shared/daily.ts';
 import { getTurnView, parseFenBoard, type TurnView } from '../shared/engine.ts';
@@ -322,7 +325,9 @@ function renderAll(): void {
     const diceSymbols = run.openingRoll
       .map((d) => DIE_METADATA[d].symbol)
       .join('');
-    headerSub.textContent = `Opening ${diceSymbols} · 3+2 · ${run.username}`;
+    const resetRefMs = dailyInfo?.serverNowMs ?? Date.now();
+    const resetIn = formatUtcResetCountdown(msUntilNextUtcMidnight(resetRefMs));
+    headerSub.textContent = `Opening ${diceSymbols} · 3+2 · ${run.username} · Reset ${resetIn}`;
   }
 
   renderLadderStrip(run);
@@ -346,10 +351,17 @@ function renderAll(): void {
   }
 }
 
+function formatRivalLabel(rival: RivalTarget): string {
+  return `🎯 Beat #${rival.rank} ${rival.username}: ${rival.wins}W · ${rival.totalTurns}t`;
+}
+
 function renderLadderStrip(run: RunState): void {
   const strip = document.getElementById('ladder-strip');
   if (!strip) return;
   strip.replaceChildren();
+  const rivalStage =
+    run.status !== 'finished' ? run.rivalTarget?.targetStage : undefined;
+
   for (const boss of GAUNTLET_LADDER) {
     const item = document.createElement('div');
     item.className = 'ladder-step';
@@ -358,7 +370,11 @@ function renderLadderStrip(run: RunState): void {
     } else if (run.currentStage === boss.stage && run.status !== 'finished') {
       item.classList.add('active');
     }
-    item.textContent = `${boss.stage}. ${boss.name}`;
+    const isRivalMark = rivalStage === boss.stage;
+    if (isRivalMark) {
+      item.classList.add('rival');
+    }
+    item.textContent = `${boss.stage}. ${boss.name}${isRivalMark ? ' 🎯' : ''}`;
     strip.appendChild(item);
   }
 }
@@ -390,6 +406,14 @@ function renderActiveGame(run: RunState): void {
   document
     .getElementById('first-try-pill')
     ?.classList.toggle('hidden', !run.firstTry);
+
+  const rivalPill = document.getElementById('rival-pill');
+  if (rivalPill) {
+    rivalPill.classList.toggle('hidden', !run.rivalTarget);
+    rivalPill.textContent = run.rivalTarget
+      ? formatRivalLabel(run.rivalTarget)
+      : '';
+  }
 
   const turnView = getTurnView(
     active.baseFen,
@@ -814,8 +838,10 @@ async function submitPendingTurn(): Promise<void> {
     if (dailyInfo) {
       dailyInfo = {
         ...dailyInfo,
+        serverNowMs: rsp.serverNowMs,
         communityHuntCount: rsp.communityHuntCount,
         communityHuntTarget: rsp.communityHuntTarget,
+        communityHuntBadge: rsp.communityHuntBadge ?? null,
       };
     }
 
@@ -837,13 +863,13 @@ function playOutcomeAudioAndSetLabel(
   bossName: string,
 ): void {
   if (rsp.stageOutcome === 'win') {
-    playSoundCue('game_win');
+    playSoundCue(rsp.run.isNewDailyBest ? 'new_record' : 'game_win');
     lastOutcomeText = `Victory vs ${bossName}!`;
   } else if (rsp.stageOutcome === 'draw') {
     playSoundCue('game_draw');
     lastOutcomeText = `Draw vs ${bossName} — Streak Held! Replay Stage ${rsp.run.currentStage}`;
   } else if (rsp.stageOutcome === 'loss') {
-    playSoundCue('game_loss');
+    playSoundCue(rsp.run.isNewDailyBest ? 'new_record' : 'game_loss');
     lastOutcomeText =
       rsp.outcomeReason === 'timeout'
         ? 'Time Expired!'
@@ -855,24 +881,45 @@ function playOutcomeAudioAndSetLabel(
 
 function renderBetweenGames(run: RunState): void {
   const opp = getStageOpponent(run.currentStage);
+  document.getElementById('pause-note')?.classList.add('hidden');
+  renderBetweenBanner(run);
+  renderBetweenNextOpponent(run, opp);
+}
+
+function renderBetweenBanner(run: RunState): void {
   const titleEl = document.getElementById('between-title');
   const streakEl = document.getElementById('between-streak');
-  const avatarEl = document.getElementById('next-boss-avatar');
-  const nameEl = document.getElementById('next-boss-name');
-  const summaryEl = document.getElementById('next-boss-summary');
-  const epitaphEl = document.getElementById('next-boss-epitaph');
-  const nextBtn = document.getElementById('btn-next-stage');
-  const pauseNote = document.getElementById('pause-note');
+  const bestEl = document.getElementById('between-best');
+  const rivalEl = document.getElementById('between-rival');
 
-  pauseNote?.classList.add('hidden');
   if (titleEl) {
     titleEl.textContent =
       lastOutcomeText || `Ready for Stage ${run.currentStage}`;
   }
   if (streakEl) {
     const star = run.firstTry ? ' · ⭐ First Try' : '';
-    streakEl.textContent = `Current Streak: ${run.wins} ${run.wins === 1 ? 'Win' : 'Wins'} (${run.totalTurns} turns)${star}`;
+    const winUnit = run.wins === 1 ? 'Win' : 'Wins';
+    streakEl.textContent = `Current Streak: ${run.wins} ${winUnit} (${run.totalTurns} turns)${star}`;
   }
+  bestEl?.classList.toggle('hidden', !run.isNewDailyBest);
+  if (rivalEl) {
+    rivalEl.classList.toggle('hidden', !run.rivalTarget);
+    rivalEl.textContent = run.rivalTarget
+      ? `Target (Stage ${run.rivalTarget.targetStage}): ${formatRivalLabel(run.rivalTarget)}`
+      : '';
+  }
+}
+
+function renderBetweenNextOpponent(
+  run: RunState,
+  opp: ReturnType<typeof getStageOpponent>,
+): void {
+  const avatarEl = document.getElementById('next-boss-avatar');
+  const nameEl = document.getElementById('next-boss-name');
+  const summaryEl = document.getElementById('next-boss-summary');
+  const epitaphEl = document.getElementById('next-boss-epitaph');
+  const nextBtn = document.getElementById('btn-next-stage');
+
   if (avatarEl) avatarEl.innerHTML = bossAvatarSvg(opp.boss.id);
   if (nameEl) {
     const sideLabel =
@@ -891,18 +938,23 @@ function renderBetweenGames(run: RunState): void {
 
 function renderFinishedSummary(run: RunState): void {
   const titleEl = document.getElementById('finish-title');
+  const bestEl = document.getElementById('finish-best');
   const summaryEl = document.getElementById('finish-summary');
   const huntEl = document.getElementById('finish-hunt');
   const cardEl = document.getElementById('finish-card');
 
   if (titleEl) titleEl.textContent = lastOutcomeText || 'Gauntlet Complete';
+  bestEl?.classList.toggle('hidden', !run.isNewDailyBest);
   if (summaryEl) {
     const rankStr = run.dailyRank ? ` · Rank #${run.dailyRank} today` : '';
     const star = run.firstTry ? ' · ⭐ First Try' : '';
     summaryEl.textContent = `${run.wins} ${run.wins === 1 ? 'Win' : 'Wins'} (${run.totalTurns} turns)${rankStr}${star}`;
   }
   if (huntEl && dailyInfo) {
-    huntEl.textContent = `Community Hunt: ${dailyInfo.communityHuntCount} / ${dailyInfo.communityHuntTarget} defeated ${dailyInfo.dailyBoss.name} today`;
+    const badgePart = dailyInfo.communityHuntBadge
+      ? ` · ${dailyInfo.communityHuntBadge}`
+      : '';
+    huntEl.textContent = `Community Hunt: ${dailyInfo.communityHuntCount} / ${dailyInfo.communityHuntTarget} defeated ${dailyInfo.dailyBoss.name} today${badgePart}`;
   }
   if (cardEl) {
     cardEl.textContent = run.shareCardText ?? '';
@@ -985,7 +1037,7 @@ async function handleResign(): Promise<void> {
       runId: currentRun.runId,
     });
     lastOutcomeText = 'Run Resigned';
-    playSoundCue('game_loss');
+    playSoundCue(rsp.run.isNewDailyBest ? 'new_record' : 'game_loss');
     isSubmitting = false;
     applyRunUpdate(rsp.run);
   } catch (err) {

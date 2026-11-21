@@ -205,6 +205,20 @@
         text-align: center;
         text-wrap: pretty;
       }
+      .hunt-badge {
+        display: inline-block;
+        margin-top: 0.35rem;
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        background: #052e16;
+        border: 1px solid #22c55e;
+        color: #bbf7d0;
+      }
+      .hidden {
+        display: none !important;
+      }
     </style>
   </head>
   <body>
@@ -232,6 +246,7 @@
           <div class="progress-track">
             <div class="progress-fill" id="hunt-fill"></div>
           </div>
+          <div class="hunt-badge hidden" id="hunt-badge"></div>
         </div>
       </section>
 
