@@ -9,10 +9,24 @@ import {
   formatUtcResetCountdown,
   getStageOpponent,
   msUntilNextUtcMidnight,
+  utcDayKey,
   type DailyOpeningRoll,
 } from '../shared/daily.ts';
 import { bossAvatarSvg, diePipSvg } from './avatars.ts';
 import { getOrCreateGuestId } from './guest.ts';
+
+let splashServerOffsetMs = 0;
+let lastSplashData: GetDailyStateRsp | null = null;
+let splashRolloverInFlight = false;
+
+async function fetchSplashState(guestId: string): Promise<void> {
+  const rsp = await fetch(
+    `/${Endpoint.GetDailyState}?guestId=${encodeURIComponent(guestId)}`,
+  );
+  if (!rsp.ok) return;
+  const data = (await rsp.json()) as GetDailyStateRsp;
+  renderSplash(data);
+}
 
 async function initSplash(): Promise<void> {
   const startBtn = document.getElementById(
@@ -26,14 +40,31 @@ async function initSplash(): Promise<void> {
 
   const guestId = getOrCreateGuestId();
   try {
-    const rsp = await fetch(
-      `/${Endpoint.GetDailyState}?guestId=${encodeURIComponent(guestId)}`,
-    );
-    if (!rsp.ok) return;
-    const data = (await rsp.json()) as GetDailyStateRsp;
-    renderSplash(data);
+    await fetchSplashState(guestId);
   } catch (err) {
     console.warn('Unable to load daily preview state', err);
+  }
+
+  window.setInterval(() => {
+    tickSplashCountdown(guestId);
+  }, 15_000);
+}
+
+function tickSplashCountdown(guestId: string): void {
+  if (!lastSplashData) return;
+  const estimatedNowMs = Date.now() + splashServerOffsetMs;
+  renderSplashStatusText(lastSplashData, estimatedNowMs);
+
+  if (
+    utcDayKey(estimatedNowMs) !== lastSplashData.dayKey &&
+    !splashRolloverInFlight
+  ) {
+    splashRolloverInFlight = true;
+    void fetchSplashState(guestId)
+      .catch(() => undefined)
+      .finally(() => {
+        splashRolloverInFlight = false;
+      });
   }
 }
 
@@ -47,6 +78,8 @@ async function launchExpandedGame(ev: MouseEvent): Promise<void> {
 }
 
 function renderSplash(data: GetDailyStateRsp): void {
+  lastSplashData = data;
+  splashServerOffsetMs = data.serverNowMs - Date.now();
   renderSplashHeader(data);
   renderSplashOpeningDice(data.openingRoll);
   renderSplashCommunityHunt(data);
@@ -57,7 +90,6 @@ function renderSplash(data: GetDailyStateRsp): void {
 function renderSplashHeader(data: GetDailyStateRsp): void {
   const titleEl = document.getElementById('daily-title');
   const subtitleEl = document.getElementById('daily-subtitle');
-  const statusEl = document.getElementById('player-status');
 
   if (titleEl) {
     titleEl.textContent = data.themeName;
@@ -68,15 +100,22 @@ function renderSplashHeader(data: GetDailyStateRsp): void {
       : '';
     subtitleEl.textContent = `Day ${data.dayKey} · Wins Streak${rivalHint}`;
   }
-  if (statusEl) {
-    const modeLabel = data.isGuest
-      ? 'Guest Mode'
-      : `Playing as ${data.playerUsername}`;
-    const resetIn = formatUtcResetCountdown(
-      msUntilNextUtcMidnight(data.serverNowMs),
-    );
-    statusEl.textContent = `${modeLabel} · Pause between matches · Resets in ${resetIn}`;
-  }
+  renderSplashStatusText(data, data.serverNowMs);
+}
+
+function renderSplashStatusText(
+  data: GetDailyStateRsp,
+  estimatedNowMs: number,
+): void {
+  const statusEl = document.getElementById('player-status');
+  if (!statusEl) return;
+  const modeLabel = data.isGuest
+    ? 'Guest Mode'
+    : `Playing as ${data.playerUsername}`;
+  const resetIn = formatUtcResetCountdown(
+    msUntilNextUtcMidnight(estimatedNowMs),
+  );
+  statusEl.textContent = `${modeLabel} · Pause between matches · Resets in ${resetIn}`;
 }
 
 function renderSplashOpeningDice(openingRoll: DailyOpeningRoll): void {

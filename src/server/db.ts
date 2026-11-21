@@ -30,6 +30,7 @@ export interface PlayerIdentity {
 
 export type StoredRunState = RunState & {
   readonly playerKey: string;
+  readonly achievedDailyBest?: boolean;
 };
 
 type StoredLeaderboardEntry = Omit<LeaderboardEntry, 'isViewer'> & {
@@ -68,9 +69,13 @@ export function resolvePlayerIdentity(
   };
 }
 
-/** Strips internal `playerKey` before serializing a RunState to API callers. */
+/** Strips internal `playerKey` and tracking flags before serializing a RunState to API callers. */
 export function toPublicRunState(run: StoredRunState): RunState {
-  const { playerKey: _omitted, ...publicRun } = run;
+  const {
+    playerKey: _omitted,
+    achievedDailyBest: _achieved,
+    ...publicRun
+  } = run;
   return publicRun;
 }
 

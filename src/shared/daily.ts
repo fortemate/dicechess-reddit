@@ -178,7 +178,7 @@ export function allPeriodKeys(nowMs: number = Date.now()): PeriodKeys {
 function hashDayKey(dayKey: string): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < dayKey.length; i += 1) {
-    hash ^= dayKey.charCodeAt(i);
+    hash ^= dayKey.codePointAt(i) ?? 0;
     hash = Math.imul(hash, 0x01000193);
   }
   return hash >>> 0;

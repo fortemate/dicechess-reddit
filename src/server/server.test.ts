@@ -432,6 +432,23 @@ describe('Devvit Web server endpoints & full gauntlet lifecycle', () => {
     assert.equal(bobWin.data.run.wins, 2);
     assert.equal(bobWin.data.run.isNewDailyBest, true);
     assert.equal(bobWin.data.run.rivalTarget, null);
+
+    // Advancing to Stage 3 clears the stage win banner, while losing/resigning Stage 3 still preserves personal best on finish.
+    const bobStage3 = await postJson<StartRunRsp>(Endpoint.StartRun, {});
+    assert.equal(bobStage3.data.resumed, true);
+    assert.equal(bobStage3.data.run.currentStage, 3);
+    assert.equal(bobStage3.data.run.isNewDailyBest, undefined);
+
+    const bobResign = await postJson<ResignRunRsp>(Endpoint.ResignRun, {
+      runId: bobStart.data.run.runId,
+    });
+    assert.equal(bobResign.data.run.status, 'finished');
+    assert.equal(bobResign.data.run.isNewDailyBest, true);
+    assert.equal(
+      'achievedDailyBest' in
+        (bobResign.data.run as unknown as Record<string, unknown>),
+      false,
+    );
   });
 
   it('requires valid Reddit or guest identity on mutating endpoints', async () => {
