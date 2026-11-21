@@ -5,12 +5,20 @@ export type DailyOpeningRoll = readonly [DiePiece, DiePiece, DiePiece];
 export type BossId =
   'rolly' | 'grabby' | 'rampage' | 'prowla' | 'thinkle' | 'ashby';
 
+export interface DieMeta {
+  readonly face: DiePiece;
+  readonly pip: 1 | 2 | 3 | 4 | 5 | 6;
+  readonly label: string;
+  readonly symbol: string;
+}
+
 export interface BossCharacter {
   readonly id: BossId;
   readonly name: string;
   readonly creature: string;
   readonly stage: number;
   readonly engineAlgorithm: string;
+  readonly accentColor: string;
   readonly summary: string;
 }
 
@@ -29,6 +37,13 @@ export interface RunResult {
   readonly completedAtMs: number;
 }
 
+export interface PeriodKeys {
+  readonly day: string;
+  readonly week: string;
+  readonly month: string;
+  readonly year: string;
+}
+
 /** 3+2 time control: 3 minutes base plus 2s increment after a complete turn. */
 export const INITIAL_CLOCK_MS = 180_000;
 export const INCREMENT_MS = 2_000;
@@ -36,8 +51,18 @@ export const INCREMENT_MS = 2_000;
 export const STANDARD_START_FEN =
   'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
-const DIE_FACES: readonly DiePiece[] = ['P', 'N', 'B', 'R', 'Q', 'K'];
-const DIE_ORDER: Record<DiePiece, number> = {
+export const DIE_FACES: readonly DiePiece[] = ['P', 'N', 'B', 'R', 'Q', 'K'];
+
+export const DIE_METADATA: Readonly<Record<DiePiece, DieMeta>> = {
+  P: { face: 'P', pip: 1, label: 'Pawn', symbol: '♙' },
+  N: { face: 'N', pip: 2, label: 'Knight', symbol: '♘' },
+  B: { face: 'B', pip: 3, label: 'Bishop', symbol: '♗' },
+  R: { face: 'R', pip: 4, label: 'Rook', symbol: '♖' },
+  Q: { face: 'Q', pip: 5, label: 'Queen', symbol: '♕' },
+  K: { face: 'K', pip: 6, label: 'King', symbol: '♔' },
+};
+
+const DIE_ORDER: Readonly<Record<DiePiece, number>> = {
   P: 1,
   N: 2,
   B: 3,
@@ -52,7 +77,8 @@ export const GAUNTLET_LADDER: readonly BossCharacter[] = [
     name: 'Rolly',
     creature: 'Forest Pixie',
     stage: 1,
-    engineAlgorithm: 'checkmate-aware',
+    engineAlgorithm: 'random-king-capture',
+    accentColor: '#eab308',
     summary: 'Trusts the dice completely, but never misses an open King.',
   },
   {
@@ -61,6 +87,7 @@ export const GAUNTLET_LADDER: readonly BossCharacter[] = [
     creature: 'Treasure Goblin',
     stage: 2,
     engineAlgorithm: 'greedy',
+    accentColor: '#a855f7',
     summary: 'Grabs the highest-value piece in reach without looking ahead.',
   },
   {
@@ -68,32 +95,36 @@ export const GAUNTLET_LADDER: readonly BossCharacter[] = [
     name: 'Rampage',
     creature: 'Little Imp',
     stage: 3,
-    engineAlgorithm: 'aggressive',
-    summary: 'Charges pawns forward and relentlessly hunts your King.',
+    engineAlgorithm: 'checkmate-aware',
+    accentColor: '#ef4444',
+    summary: 'Guards his own King while hunting any opening on yours.',
   },
   {
     id: 'prowla',
     name: 'Prowla',
     creature: 'Cat Sorceress',
     stage: 4,
-    engineAlgorithm: 'tactician-prowla',
-    summary: 'Waits for loose pieces and springs fast tactical traps.',
+    engineAlgorithm: 'greedy-v2',
+    accentColor: '#ec4899',
+    summary: 'Snatches material without exposing her King to counter-rolls.',
   },
   {
     id: 'thinkle',
     name: 'Thinkle',
     creature: 'Star Wizard',
     stage: 5,
-    engineAlgorithm: 'aggressive-book',
-    summary: 'Plays disciplined openings and calculates king-safety lines.',
+    engineAlgorithm: 'aggressive',
+    accentColor: '#38bdf8',
+    summary: 'Pushes pawns, attacks pieces, and forces King danger early.',
   },
   {
     id: 'ashby',
     name: 'Ashby',
     creature: 'Mountain Dragon',
     stage: 6,
-    engineAlgorithm: 'tactician-ashby',
-    summary: 'Daily Boss — guards the summit with punishing tactical search.',
+    engineAlgorithm: 'aggressive',
+    accentColor: '#f97316',
+    summary: 'Daily Boss — strikes first as White with relentless pressure.',
   },
 ];
 
@@ -102,6 +133,45 @@ const ASCENDED_POOL: readonly BossCharacter[] = GAUNTLET_LADDER.slice(3);
 /** Returns the canonical YYYY-MM-DD day key using the 00:00 UTC boundary. */
 export function utcDayKey(nowMs: number = Date.now()): string {
   return new Date(nowMs).toISOString().slice(0, 10);
+}
+
+/** Returns the ISO-8601 UTC week key (YYYY-Www). */
+export function utcWeekKey(nowMs: number = Date.now()): string {
+  const source = new Date(nowMs);
+  const date = new Date(
+    Date.UTC(
+      source.getUTCFullYear(),
+      source.getUTCMonth(),
+      source.getUTCDate(),
+    ),
+  );
+  const dayNum = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(
+    ((date.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7,
+  );
+  return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+/** Returns the UTC month key (YYYY-MM). */
+export function utcMonthKey(nowMs: number = Date.now()): string {
+  return new Date(nowMs).toISOString().slice(0, 7);
+}
+
+/** Returns the UTC year key (YYYY). */
+export function utcYearKey(nowMs: number = Date.now()): string {
+  return new Date(nowMs).toISOString().slice(0, 4);
+}
+
+/** Returns all calendar leaderboard keys aligned to 00:00 UTC. */
+export function allPeriodKeys(nowMs: number = Date.now()): PeriodKeys {
+  return {
+    day: utcDayKey(nowMs),
+    week: utcWeekKey(nowMs),
+    month: utcMonthKey(nowMs),
+    year: utcYearKey(nowMs),
+  };
 }
 
 /** Deterministic 32-bit FNV-1a hash for generating repeatable daily hooks. */
@@ -126,6 +196,52 @@ export function getDailyOpeningRoll(dayKey: string): DailyOpeningRoll {
     (a, b) => DIE_ORDER[a] - DIE_ORDER[b],
   );
   return [sorted[0] ?? 'P', sorted[1] ?? 'P', sorted[2] ?? 'P'];
+}
+
+/** Returns an evocative daily theme title derived from the fixed opening roll. */
+export function getDailyThemeName(roll: DailyOpeningRoll): string {
+  const extras = roll.slice(1).join('');
+  switch (extras) {
+    case 'PP':
+      return 'Pawn Phalanx';
+    case 'PN':
+    case 'NN':
+      return "Knight's Charge";
+    case 'PB':
+    case 'BB':
+      return "Bishop's Fianchetto";
+    case 'PR':
+    case 'RR':
+      return 'Rook Vanguard';
+    case 'PQ':
+    case 'QQ':
+      return 'Royal Surge';
+    case 'PK':
+    case 'KK':
+      return 'King March';
+    case 'NB':
+      return 'Minor Piece Blitz';
+    case 'NR':
+      return 'Iron Cavalry';
+    case 'NQ':
+      return 'Knight & Queen Gambit';
+    case 'NK':
+      return 'Knight Escort';
+    case 'BR':
+      return 'Diagonal Cannon';
+    case 'BQ':
+      return 'Imperial Diagonal';
+    case 'BK':
+      return 'Crown Sanctuary';
+    case 'RQ':
+      return 'Heavy Battery';
+    case 'RK':
+      return 'Castle Wall';
+    case 'QK':
+      return 'Sovereign Opening';
+    default:
+      return 'Daily Gauntlet';
+  }
 }
 
 /** Formats a roll in DFEN case matching the active side (`w` uppercase, `b` lowercase). */

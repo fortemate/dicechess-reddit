@@ -4,40 +4,823 @@
     <meta charset="utf-8" />
     <meta
       name="viewport"
-      content="width=device-width, maximum-scale=1, minimum-scale=1, user-scalable=no"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
     <title>Dice Chess Daily — Gauntlet</title>
     <link rel="modulepreload" href="game.js" />
     <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --panel-soft: #0f172a;
+        --border: #334155;
+        --text: #f8fafc;
+        --muted: #cbd5e1;
+        --accent: #f59e0b;
+        --accent-ink: #0f172a;
+        --green: #22c55e;
+        --danger: #ef4444;
+        --light-sq: #edd9b7;
+        --dark-sq: #b58863;
+        --target-size: 24px;
+      }
+      @media (pointer: coarse) {
+        :root {
+          --target-size: 44px;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
-        width: 100dvw;
-        height: 100dvh;
-        overflow: hidden;
-        display: grid;
-        place-items: center;
+        min-block-size: 100dvh;
         font-family:
           system-ui,
           -apple-system,
+          BlinkMacSystemFont,
           sans-serif;
-        background: #141821;
-        color: #f3f5f8;
+        background: radial-gradient(circle at top, #1e293b 0%, #0f172a 75%);
+        color: var(--text);
+        overflow-wrap: break-word;
+        padding: max(0.5rem, env(safe-area-inset-top, 0px))
+          max(0.5rem, env(safe-area-inset-right, 0px))
+          max(0.75rem, env(safe-area-inset-bottom, 0px))
+          max(0.5rem, env(safe-area-inset-left, 0px));
       }
-      main {
+      .shell {
+        width: min(100%, 520px);
+        margin: 0 auto;
+        display: grid;
+        gap: 0.55rem;
+      }
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        text-wrap: balance;
+      }
+      p {
+        margin: 0;
+        text-wrap: pretty;
+      }
+      button {
+        font: inherit;
+        min-block-size: var(--target-size);
+        min-inline-size: var(--target-size);
+        cursor: pointer;
+      }
+      button:focus-visible {
+        outline: 2px solid #ffffff;
+        outline-offset: 2px;
+      }
+      .header-bar {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.45rem;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.45rem 0.65rem;
+      }
+      .brand-title {
+        font-size: 0.96rem;
+        font-weight: 800;
+      }
+      .brand-sub {
+        font-size: 0.74rem;
+        color: var(--muted);
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        align-items: center;
+      }
+      .icon-btn {
+        background: var(--panel-soft);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.3rem 0.55rem;
+        font-size: 0.82rem;
+        font-weight: 700;
+      }
+      .ladder-strip {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 0.25rem;
+      }
+      .ladder-step {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.25rem 0.2rem;
+        text-align: center;
+        font-size: 0.68rem;
+        color: var(--muted);
+        font-weight: 700;
+      }
+      .ladder-step.cleared {
+        border-color: #22c55e;
+        background: #052e16;
+        color: #bbf7d0;
+      }
+      .ladder-step.active {
+        border-color: var(--accent);
+        background: #3b1d06;
+        color: #fef08a;
+      }
+      .micro-guide {
+        background: #082f49;
+        border: 1px solid #38bdf8;
+        border-radius: 10px;
+        padding: 0.5rem 0.65rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.78rem;
+        color: #f0f9ff;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 0.75rem;
+        display: grid;
+        gap: 0.6rem;
+      }
+      .strip {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.6rem;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.45rem 0.65rem;
+      }
+      .opp-left {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        min-inline-size: 0;
+      }
+      .avatar-sm {
+        width: 42px;
+        height: 42px;
+        flex-shrink: 0;
+      }
+      .avatar-lg {
+        width: 72px;
+        height: 72px;
+        margin: 0 auto;
+      }
+      .avatar-sm svg,
+      .avatar-lg svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .opp-name {
+        font-size: 0.9rem;
+        font-weight: 800;
+      }
+      .opp-bubble {
+        font-size: 0.76rem;
+        color: #cbd5e1;
+        font-style: italic;
+      }
+      .clock-box {
+        font-variant-numeric: tabular-nums;
+        font-size: 1rem;
+        font-weight: 800;
+        padding: 0.3rem 0.6rem;
+        border-radius: 8px;
+        background: #0f172a;
+        border: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      .clock-box.low {
+        background: #450a0a;
+        border-color: var(--danger);
+        color: #fecaca;
+      }
+      .board-wrap {
+        width: min(100%, 440px);
+        margin: 0 auto;
+        aspect-ratio: 1 / 1;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 2px solid #475569;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+      }
+      .board {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        grid-template-rows: repeat(8, 1fr);
+      }
+      .sq {
+        position: relative;
+        border: 0;
+        padding: 0;
+        margin: 0;
+        min-block-size: 0;
+        min-inline-size: 0;
+        display: grid;
+        place-items: center;
+        background: var(--light-sq);
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .sq.dark {
+        background: var(--dark-sq);
+      }
+      .sq.last-move::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: rgba(250, 204, 21, 0.35);
+        pointer-events: none;
+      }
+      .sq.selected::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: rgba(56, 189, 248, 0.45);
+        box-shadow: inset 0 0 0 3px #0284c7;
+        pointer-events: none;
+      }
+      .sq.legal-origin {
+        box-shadow: inset 0 0 0 2px rgba(245, 158, 11, 0.8);
+      }
+      .sq.legal-target::after {
+        content: '';
+        position: absolute;
+        width: 28%;
+        height: 28%;
+        border-radius: 50%;
+        background: rgba(15, 23, 42, 0.38);
+        pointer-events: none;
+      }
+      .sq.legal-capture::after {
+        width: 82%;
+        height: 82%;
+        background: transparent;
+        border: 4px solid rgba(15, 23, 42, 0.45);
+      }
+      .sq.king-target::after {
+        width: 86%;
+        height: 86%;
+        background: rgba(239, 68, 68, 0.28);
+        border: 4px solid #dc2626;
+      }
+      .sq img {
+        position: relative;
+        z-index: 1;
+        width: 86%;
+        height: 86%;
+        object-fit: contain;
+        pointer-events: none;
+      }
+      .coord {
+        position: absolute;
+        font-size: 0.56rem;
+        font-weight: 800;
+        line-height: 1;
+        opacity: 0.68;
+        pointer-events: none;
+        color: #1e293b;
+      }
+      .coord.file {
+        bottom: 2px;
+        right: 3px;
+      }
+      .coord.rank {
+        top: 2px;
+        left: 3px;
+      }
+      .controls-panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.55rem 0.65rem;
+        display: grid;
+        gap: 0.55rem;
+      }
+      .dice-tray {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.45rem;
+      }
+      .die-slot {
+        background: #0f172a;
+        border: 2px solid #475569;
+        border-radius: 10px;
+        padding: 0.35rem 0.4rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        font-size: 0.82rem;
+        font-weight: 700;
+      }
+      .die-slot.playable {
+        border-color: var(--accent);
+        background: #3b1d06;
+        color: #fef3c7;
+      }
+      .die-slot.spent {
+        border-style: dashed;
+        border-color: #475569;
+        background: #1e293b;
+        color: #cbd5e1;
+      }
+      .die-slot svg {
+        width: 20px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+      .action-row {
+        display: grid;
+        grid-template-columns: 1fr 1.6fr;
+        gap: 0.45rem;
+      }
+      .btn-primary {
+        border: 0;
+        border-radius: 10px;
+        padding: 0.55rem 0.85rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #f59e0b, #fbbf24);
+        color: var(--accent-ink);
+      }
+      .btn-primary:disabled {
+        opacity: 0.42;
+        cursor: not-allowed;
+      }
+      .btn-secondary {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 0.55rem 0.85rem;
+        font-weight: 700;
+        background: var(--panel-soft);
+        color: var(--text);
+      }
+      .btn-secondary:disabled {
+        opacity: 0.42;
+        cursor: not-allowed;
+      }
+      .btn-danger {
+        border: 1px solid #ef4444;
+        border-radius: 10px;
+        padding: 0.55rem 0.85rem;
+        font-weight: 700;
+        background: #450a0a;
+        color: #fee2e2;
+      }
+      .epitaph-box {
+        background: #450a0a;
+        border: 1px solid #ef4444;
+        border-radius: 10px;
+        padding: 0.55rem 0.7rem;
+        font-size: 0.82rem;
+        color: #fee2e2;
+      }
+      .chronicle-box {
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 0.65rem;
+        font-size: 0.82rem;
+        white-space: pre-wrap;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+      }
+      .hidden {
+        display: none !important;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.18rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.74rem;
+        font-weight: 700;
+        background: #3b1d06;
+        color: #fef08a;
+        border: 1px solid #f59e0b;
+      }
+      dialog {
+        width: min(94vw, 460px);
+        max-block-size: 86dvh;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 1rem;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
+      }
+      dialog[open] {
         display: grid;
         gap: 0.75rem;
-        justify-items: center;
-        text-align: center;
-        padding: 1rem;
+      }
+      dialog:modal {
+        overscroll-behavior: contain;
+      }
+      dialog::backdrop {
+        background: rgba(2, 6, 23, 0.72);
+        overflow: hidden;
+        overscroll-behavior: contain;
+      }
+      .dialog-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .tab-row {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.35rem;
+      }
+      .tab-btn {
+        border: 1px solid var(--border);
+        background: #0f172a;
+        color: var(--muted);
+        border-radius: 8px;
+        padding: 0.35rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+      }
+      .tab-btn[aria-selected='true'] {
+        border-color: var(--accent);
+        background: #3b1d06;
+        color: #fef3c7;
+      }
+      .table-scroll {
+        overflow: auto;
+        max-block-size: 48dvh;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.82rem;
+      }
+      th,
+      td {
+        padding: 0.42rem 0.35rem;
+        border-bottom: 1px solid #334155;
+        text-align: left;
+      }
+      tr.me {
+        background: #3b1d06;
+      }
+      .promo-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.5rem;
+      }
+      .promo-choice {
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 0.5rem;
+        display: grid;
+        place-items: center;
+        gap: 0.25rem;
+        color: var(--text);
+        font-size: 0.76rem;
+        font-weight: 700;
+      }
+      .promo-choice img {
+        width: 40px;
+        height: 40px;
+      }
+      .guest-form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+      }
+      .guest-form input {
+        flex: 1 1 150px;
+        min-block-size: var(--target-size);
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        padding: 0.35rem 0.6rem;
+        font: inherit;
+        font-size: 0.85rem;
       }
     </style>
   </head>
   <body>
-    <main>
-      <h1>Dice Chess Daily</h1>
-      <p id="gauntlet-status">Loading…</p>
-      <p id="stage-info"></p>
-    </main>
+    <div class="shell">
+      <header class="header-bar">
+        <div>
+          <div class="brand-title" id="header-title">Dice Chess Daily</div>
+          <div class="brand-sub" id="header-sub">Loading gauntlet…</div>
+        </div>
+        <div class="toolbar">
+          <button class="icon-btn" id="btn-sound" type="button">
+            🔊 Sound
+          </button>
+          <button class="icon-btn" id="btn-rules" type="button">? Rules</button>
+          <button class="icon-btn" id="btn-lb" type="button">🏆 Ranks</button>
+        </div>
+      </header>
+
+      <nav
+        class="ladder-strip"
+        id="ladder-strip"
+        aria-label="Boss Ladder"
+      ></nav>
+
+      <aside class="micro-guide hidden" id="micro-guide">
+        <span>
+          🎲 <strong>3 dice</strong> = piece types you move this turn (up to 3
+          micro-moves). 👑 <strong>No check/checkmate</strong> — capture the
+          enemy King!
+        </span>
+        <button
+          class="icon-btn"
+          id="btn-dismiss-guide"
+          type="button"
+          aria-label="Dismiss tip"
+        >
+          OK
+        </button>
+      </aside>
+
+      <!-- Active Game View -->
+      <section id="view-game" class="hidden" aria-label="Active Match">
+        <div class="strip" style="margin-bottom: 0.5rem">
+          <div class="opp-left">
+            <div class="avatar-sm" id="opp-avatar"></div>
+            <div>
+              <div class="opp-name" id="opp-name">Rolly</div>
+              <div class="opp-bubble" id="opp-bubble">Let's roll!</div>
+            </div>
+          </div>
+          <div class="clock-box" id="opp-clock" aria-live="off">03:00</div>
+        </div>
+
+        <div class="board-wrap">
+          <div
+            class="board"
+            id="board"
+            role="grid"
+            aria-label="Dice Chess Board"
+          ></div>
+        </div>
+
+        <div class="controls-panel" style="margin-top: 0.5rem">
+          <div
+            class="dice-tray"
+            id="dice-tray"
+            aria-label="Active Turn Dice"
+          ></div>
+          <div class="action-row">
+            <button class="btn-secondary" id="btn-undo" type="button">
+              ↩️ Undo
+            </button>
+            <button class="btn-primary" id="btn-commit" type="button">
+              ✅ End Turn
+            </button>
+          </div>
+          <div class="strip" style="padding: 0.35rem 0.5rem">
+            <div style="display: flex; flex-wrap: wrap; gap: 0.4rem">
+              <span class="pill" id="streak-pill">0 Wins · 0t</span>
+              <span class="pill hidden" id="first-try-pill">⭐ First Try</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.45rem">
+              <button class="icon-btn" id="btn-resign" type="button">
+                🏳️ Resign
+              </button>
+              <div class="clock-box" id="player-clock" aria-live="off">
+                03:00
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Between-Games Pause & Next Boss Screen -->
+      <section
+        id="view-between"
+        class="card hidden"
+        aria-label="Next Gauntlet Stage"
+      >
+        <div style="text-align: center; display: grid; gap: 0.35rem">
+          <h2 id="between-title">Stage Cleared!</h2>
+          <p id="between-streak" style="color: #fde68a; font-weight: 700"></p>
+        </div>
+        <div
+          class="card"
+          style="background: var(--panel-soft); text-align: center"
+        >
+          <div class="avatar-lg" id="next-boss-avatar"></div>
+          <h3 id="next-boss-name">Next Challenger</h3>
+          <p
+            id="next-boss-summary"
+            style="color: var(--muted); font-size: 0.84rem"
+          ></p>
+          <div class="epitaph-box" id="next-boss-epitaph"></div>
+        </div>
+        <button class="btn-primary" id="btn-next-stage" type="button">
+          ⚔️ Play Next Stage
+        </button>
+        <button class="btn-secondary" id="btn-pause" type="button">
+          ⏸️ Pause &amp; Continue Later
+        </button>
+        <p
+          id="pause-note"
+          class="hidden"
+          style="color: #86efac; font-size: 0.82rem; text-align: center"
+        >
+          Run safely saved! Close anytime and resume later from this post.
+        </p>
+      </section>
+
+      <!-- Run Finished & Share Screen -->
+      <section id="view-finished" class="card hidden" aria-label="Run Complete">
+        <div style="text-align: center; display: grid; gap: 0.3rem">
+          <h2 id="finish-title">Gauntlet Complete</h2>
+          <p id="finish-summary" style="color: #fde68a; font-weight: 800"></p>
+          <p
+            id="finish-hunt"
+            style="color: var(--muted); font-size: 0.84rem"
+          ></p>
+        </div>
+        <pre class="chronicle-box" id="finish-card"></pre>
+        <div id="guest-nick-box" class="guest-form hidden">
+          <label for="guest-nick-input" style="font-size: 0.8rem"
+            >Optional nickname for next run:</label
+          >
+          <input
+            id="guest-nick-input"
+            type="text"
+            maxlength="24"
+            placeholder="Your nickname"
+          />
+          <button class="btn-secondary" id="btn-save-nick" type="button">
+            Save
+          </button>
+        </div>
+        <div class="action-row">
+          <button class="btn-secondary" id="btn-copy-share" type="button">
+            📋 Copy Card
+          </button>
+          <button class="btn-primary" id="btn-post-comment" type="button">
+            💬 Post Comment
+          </button>
+        </div>
+        <p
+          id="share-feedback"
+          style="font-size: 0.8rem; color: var(--muted); text-align: center"
+        ></p>
+        <button class="btn-primary" id="btn-play-again" type="button">
+          ⚔️ Start New Gauntlet Attempt
+        </button>
+      </section>
+    </div>
+
+    <!-- Rules Dialog -->
+    <dialog id="rules-dialog" closedby="any" aria-labelledby="rules-title">
+      <div class="dialog-head">
+        <h2 id="rules-title">How Dice Chess Daily Works</h2>
+        <form method="dialog">
+          <button class="icon-btn" type="submit" aria-label="Close rules">
+            ✕
+          </button>
+        </form>
+      </div>
+      <p style="font-size: 0.86rem">
+        <strong>1. Roll &amp; Micro-moves:</strong> Each turn rolls 3 dice
+        (<strong>P, N, B, R, Q, K</strong>). Play up to 3 micro-moves maximizing
+        dice used.
+      </p>
+      <p style="font-size: 0.86rem">
+        <strong>2. Daily Opening Roll:</strong> Turn 1 of both White &amp; Black
+        uses today's shared <strong>P + 2</strong> roll. Turn 2+ is random.
+      </p>
+      <p style="font-size: 0.86rem">
+        <strong>3. Capture the King:</strong> There is no check or checkmate —
+        win immediately by capturing the enemy King!
+      </p>
+      <p style="font-size: 0.86rem">
+        <strong>4. Gauntlet &amp; 3+2 Clock:</strong> Beat
+        <em>Rolly → Grabby → Rampage → Prowla → Thinkle → Ashby</em>, then
+        continue into Ascended Mode! Draws hold your stage for a replay. Pause
+        between games anytime; clocks keep ticking during live games.
+      </p>
+    </dialog>
+
+    <!-- Leaderboards Dialog -->
+    <dialog id="leaderboard-dialog" closedby="any" aria-labelledby="lb-title">
+      <div class="dialog-head">
+        <h2 id="lb-title">Gauntlet Leaderboards</h2>
+        <form method="dialog">
+          <button
+            class="icon-btn"
+            type="submit"
+            aria-label="Close leaderboards"
+          >
+            ✕
+          </button>
+        </form>
+      </div>
+      <div class="tab-row" role="tablist" aria-label="Leaderboard Periods">
+        <button
+          class="tab-btn"
+          type="button"
+          role="tab"
+          data-period="day"
+          aria-selected="true"
+        >
+          Day
+        </button>
+        <button
+          class="tab-btn"
+          type="button"
+          role="tab"
+          data-period="week"
+          aria-selected="false"
+        >
+          Week
+        </button>
+        <button
+          class="tab-btn"
+          type="button"
+          role="tab"
+          data-period="month"
+          aria-selected="false"
+        >
+          Month
+        </button>
+        <button
+          class="tab-btn"
+          type="button"
+          role="tab"
+          data-period="year"
+          aria-selected="false"
+        >
+          Year
+        </button>
+      </div>
+      <section class="table-scroll" aria-label="Leaderboard table">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Player</th>
+              <th>Wins</th>
+              <th>Turns</th>
+            </tr>
+          </thead>
+          <tbody id="lb-body"></tbody>
+        </table>
+      </section>
+    </dialog>
+
+    <!-- Promotion Dialog -->
+    <dialog id="promo-dialog" closedby="any" aria-labelledby="promo-title">
+      <div class="dialog-head">
+        <h2 id="promo-title">Choose Promotion</h2>
+      </div>
+      <div class="promo-grid" id="promo-grid"></div>
+    </dialog>
+
+    <!-- Resign Confirmation Dialog -->
+    <dialog id="resign-dialog" closedby="any" aria-labelledby="resign-title">
+      <h2 id="resign-title">Resign Current Run?</h2>
+      <p style="font-size: 0.86rem; color: var(--muted)">
+        Resigning ends this gauntlet attempt immediately and posts your current
+        wins to today's leaderboard.
+      </p>
+      <div class="action-row">
+        <form method="dialog">
+          <button
+            class="btn-secondary"
+            style="width: 100%"
+            type="submit"
+            autofocus
+          >
+            Keep Playing
+          </button>
+        </form>
+        <button class="btn-danger" id="btn-confirm-resign" type="button">
+          🏳️ Resign Run
+        </button>
+      </div>
+    </dialog>
+
     <script src="game.js" type="module"></script>
   </body>
 </html>

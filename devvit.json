@@ -15,6 +15,14 @@
     "dir": "dist/server",
     "entry": "index.cjs"
   },
+  "permissions": {
+    "redis": true,
+    "reddit": {
+      "enable": true,
+      "scope": "user",
+      "asUser": ["SUBMIT_COMMENT"]
+    }
+  },
   "menu": {
     "items": [
       {

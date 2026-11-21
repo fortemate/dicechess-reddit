@@ -2,20 +2,41 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { DiceChess } from '@fortemate/dicechess-engine/rules';
 import {
+  allPeriodKeys,
   compareRuns,
   getDailyOpeningRoll,
+  getDailyThemeName,
   getStageOpponent,
   STANDARD_START_FEN,
   utcDayKey,
+  utcMonthKey,
+  utcWeekKey,
+  utcYearKey,
   withOpeningRollDfen,
 } from './daily.ts';
 
 describe('daily rules & gauntlet definitions', () => {
-  it('switches UTC day strictly at 00:00 UTC', () => {
-    const beforeMidnight = Date.parse('2026-11-21T23:59:59.999Z');
-    const atMidnight = Date.parse('2026-11-22T00:00:00.000Z');
-    assert.equal(utcDayKey(beforeMidnight), '2026-11-21');
-    assert.equal(utcDayKey(atMidnight), '2026-11-22');
+  it('switches UTC day, week, month, and year keys strictly at 00:00 UTC', () => {
+    const beforeMidnight = Date.parse('2026-12-31T23:59:59.999Z');
+    const atMidnight = Date.parse('2027-01-01T00:00:00.000Z');
+    assert.equal(utcDayKey(beforeMidnight), '2026-12-31');
+    assert.equal(utcMonthKey(beforeMidnight), '2026-12');
+    assert.equal(utcYearKey(beforeMidnight), '2026');
+    assert.equal(utcWeekKey(beforeMidnight), '2026-W53');
+
+    const jan1 = allPeriodKeys(atMidnight);
+    assert.deepEqual(jan1, {
+      day: '2027-01-01',
+      week: '2026-W53',
+      month: '2027-01',
+      year: '2027',
+    });
+
+    const jan3End = Date.parse('2027-01-03T23:59:59.999Z');
+    assert.equal(utcWeekKey(jan3End), '2026-W53');
+
+    const week1Start = Date.parse('2027-01-04T00:00:00.000Z');
+    assert.equal(utcWeekKey(week1Start), '2027-W01');
   });
 
   it('guarantees a Pawn die and legal turn-1 moves for White and Black across 30 days', () => {
@@ -27,6 +48,7 @@ describe('daily rules & gauntlet definitions', () => {
       const roll = getDailyOpeningRoll(dayKey);
       assert.equal(roll.length, 3);
       assert.ok(roll.includes('P'), `Day ${dayKey} roll must contain a Pawn`);
+      assert.ok(getDailyThemeName(roll).length > 0);
 
       const whiteDfen = withOpeningRollDfen(STANDARD_START_FEN, roll);
       const blackDfen = withOpeningRollDfen(blackStartFen, roll);
@@ -63,6 +85,12 @@ describe('daily rules & gauntlet definitions', () => {
     assert.equal(stage7.ascensionTier, 1);
     assert.equal(stage7.boss.id, 'prowla');
     assert.equal(stage7.playerColor, 'w');
+
+    const stage10 = getStageOpponent(10);
+    assert.equal(stage10.isAscended, true);
+    assert.equal(stage10.ascensionTier, 2);
+    assert.equal(stage10.boss.id, 'prowla');
+    assert.equal(stage10.playerColor, 'b');
   });
 
   it('orders leaderboard runs by wins desc, totalTurns asc, firstTry desc, completedAtMs asc', () => {
