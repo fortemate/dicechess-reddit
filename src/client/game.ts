@@ -1,8 +1,8 @@
 import {
   Endpoint,
   type GetDailyStateRsp,
-  type GetLeaderboardsRsp,
   type LeaderboardEntry,
+  type LeaderboardsBundle,
   type PauseRunRsp,
   type ResignRunRsp,
   type RunState,
@@ -14,11 +14,12 @@ import {
 import {
   DIE_METADATA,
   GAUNTLET_LADDER,
+  getDailyThemeName,
   getStageOpponent,
   type DiePiece,
 } from '../shared/daily.ts';
 import { getTurnView, parseFenBoard, type TurnView } from '../shared/engine.ts';
-import { playSoundCue } from './audio.ts';
+import { isSoundMuted, playSoundCue, setSoundMuted } from './audio.ts';
 import { bossAvatarSvg, diePipSvg } from './avatars.ts';
 import {
   dismissMicroGuide,
@@ -43,12 +44,14 @@ let currentRun: RunState | null = null;
 let pendingMoves: string[] = [];
 let selectedSquare: string | null = null;
 let isSubmitting = false;
-let clockBaseLocalMs = Date.now();
+let clockBasePerfMs = performance.now();
 let clockElapsedAtSyncMs = 0;
 let autoTimeoutTriggered = false;
 let lastOutcomeText = '';
 let activeLbPeriod: LeaderboardPeriod = 'day';
-let cachedLeaderboards: GetLeaderboardsRsp | null = null;
+let cachedLeaderboards: LeaderboardsBundle | null = null;
+let leaderboardLoadError = false;
+let runUpdateEpoch = 0;
 
 async function init(): Promise<void> {
   setupLightDismissFallback();
@@ -58,19 +61,22 @@ async function init(): Promise<void> {
   const guestId = getOrCreateGuestId();
   const guestNick = getGuestNickname();
 
-  try {
-    const dailyRsp = await fetch(
-      `/${Endpoint.GetDailyState}?guestId=${encodeURIComponent(guestId)}`,
-    );
-    if (dailyRsp.ok) {
-      dailyInfo = (await dailyRsp.json()) as GetDailyStateRsp;
-    }
+  void refreshDailyPreviewState(guestId)
+    .then((info) => {
+      if (info && currentRun?.dayKey === info.dayKey) {
+        renderAll();
+      }
+    })
+    .catch((err) => {
+      console.warn('Preview load failed; proceeding with run start', err);
+    });
 
+  try {
     const startRsp = await postJson<StartRunRsp>(Endpoint.StartRun, {
       guestId,
       ...(guestNick ? { guestNickname: guestNick } : {}),
     });
-    applyRunUpdate(startRsp.run);
+    applyRunUpdate(startRsp.run, startRsp.serverNowMs);
   } catch (err) {
     console.error('Failed to bootstrap game', err);
     const sub = document.getElementById('header-sub');
@@ -80,17 +86,26 @@ async function init(): Promise<void> {
   window.setInterval(updateClockDisplay, 250);
 }
 
+async function refreshDailyPreviewState(
+  guestId = getOrCreateGuestId(),
+): Promise<GetDailyStateRsp | null> {
+  const dailyRsp = await fetch(
+    `/${Endpoint.GetDailyState}?guestId=${encodeURIComponent(guestId)}`,
+  );
+  if (!dailyRsp.ok) return null;
+  dailyInfo = (await dailyRsp.json()) as GetDailyStateRsp;
+  return dailyInfo;
+}
+
 function setupControls(): void {
   const soundBtn = document.getElementById('btn-sound');
   if (soundBtn) {
-    import('./audio.ts').then(({ isSoundMuted, setSoundMuted }) => {
-      let muted = isSoundMuted();
-      soundBtn.textContent = muted ? '🔇' : '🔊';
-      soundBtn.addEventListener('click', () => {
-        muted = !muted;
-        setSoundMuted(muted);
-        soundBtn.textContent = muted ? '🔇' : '🔊';
-      });
+    let muted = isSoundMuted();
+    soundBtn.textContent = muted ? '🔇 Muted' : '🔊 Sound';
+    soundBtn.addEventListener('click', () => {
+      muted = !muted;
+      setSoundMuted(muted);
+      soundBtn.textContent = muted ? '🔇 Muted' : '🔊 Sound';
     });
   }
 
@@ -108,6 +123,12 @@ function setupControls(): void {
     void openLeaderboards(lbDialog);
   });
 
+  setupLeaderboardTabs();
+  setupGameplayControls();
+  setupRunLifecycleControls();
+}
+
+function setupLeaderboardTabs(): void {
   document
     .querySelectorAll<HTMLButtonElement>('[data-period]')
     .forEach((btn) => {
@@ -126,7 +147,9 @@ function setupControls(): void {
         renderLeaderboardTable();
       });
     });
+}
 
+function setupGameplayControls(): void {
   document.getElementById('btn-undo')?.addEventListener('click', () => {
     if (isSubmitting || pendingMoves.length === 0) return;
     pendingMoves = pendingMoves.slice(0, -1);
@@ -139,16 +162,28 @@ function setupControls(): void {
   });
 
   window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter' && currentRun?.status === 'in_game') {
-      const commitBtn = document.getElementById(
-        'btn-commit',
-      ) as HTMLButtonElement | null;
-      if (commitBtn && !commitBtn.disabled) {
-        void submitPendingTurn();
-      }
+    if (ev.defaultPrevented || ev.key !== 'Enter') return;
+    if (currentRun?.status !== 'in_game') return;
+    if (document.querySelector('dialog[open]') !== null) return;
+    const activeEl = document.activeElement;
+    if (
+      activeEl instanceof HTMLElement &&
+      activeEl.matches(
+        'button, input, select, textarea, a, [contenteditable="true"]',
+      )
+    ) {
+      return;
+    }
+    const commitBtn = document.getElementById(
+      'btn-commit',
+    ) as HTMLButtonElement | null;
+    if (commitBtn && !commitBtn.disabled) {
+      void submitPendingTurn();
     }
   });
+}
 
+function setupRunLifecycleControls(): void {
   const resignDialog = document.getElementById(
     'resign-dialog',
   ) as HTMLDialogElement | null;
@@ -165,19 +200,15 @@ function setupControls(): void {
   document.getElementById('btn-next-stage')?.addEventListener('click', () => {
     void handleStartOrAdvance(false);
   });
-
   document.getElementById('btn-pause')?.addEventListener('click', () => {
     void handlePause();
   });
-
   document.getElementById('btn-play-again')?.addEventListener('click', () => {
     void handleStartOrAdvance(true);
   });
-
   document.getElementById('btn-copy-share')?.addEventListener('click', () => {
     void handleCopyShare();
   });
-
   document.getElementById('btn-post-comment')?.addEventListener('click', () => {
     void handlePostComment();
   });
@@ -186,10 +217,13 @@ function setupControls(): void {
     const input = document.getElementById(
       'guest-nick-input',
     ) as HTMLInputElement | null;
-    if (input) {
-      setGuestNickname(input.value);
-      const fb = document.getElementById('share-feedback');
-      if (fb) fb.textContent = 'Nickname saved for your next run.';
+    if (!input) return;
+    const saved = setGuestNickname(input.value);
+    const fb = document.getElementById('share-feedback');
+    if (fb) {
+      fb.textContent = saved
+        ? 'Nickname saved for your next run.'
+        : 'Nickname kept for this session (storage restricted).';
     }
   });
 }
@@ -232,15 +266,42 @@ function setupLightDismissFallback(): void {
     });
 }
 
-function applyRunUpdate(run: RunState): void {
+function applyRunUpdate(run: RunState, serverNowMs?: number): void {
+  runUpdateEpoch += 1;
+  const promoDialog = document.getElementById(
+    'promo-dialog',
+  ) as HTMLDialogElement | null;
+  if (promoDialog?.open) {
+    promoDialog.close();
+  }
+
   currentRun = run;
   pendingMoves = [];
   selectedSquare = null;
   autoTimeoutTriggered = false;
-  clockBaseLocalMs = Date.now();
-  clockElapsedAtSyncMs = run.activeGame
-    ? Math.max(0, run.updatedAtMs - run.activeGame.turnStartedAtMs)
-    : 0;
+  clockBasePerfMs = performance.now();
+
+  if (run.activeGame) {
+    const syncRefMs =
+      typeof serverNowMs === 'number' ? serverNowMs : run.updatedAtMs;
+    clockElapsedAtSyncMs = Math.max(
+      0,
+      syncRefMs - run.activeGame.turnStartedAtMs,
+    );
+  } else {
+    clockElapsedAtSyncMs = 0;
+  }
+
+  if (!dailyInfo || dailyInfo.dayKey !== run.dayKey) {
+    void refreshDailyPreviewState()
+      .then((info) => {
+        if (info && currentRun?.dayKey === info.dayKey) {
+          renderAll();
+        }
+      })
+      .catch(() => undefined);
+  }
+
   renderAll();
 }
 
@@ -251,9 +312,11 @@ function renderAll(): void {
   const headerTitle = document.getElementById('header-title');
   const headerSub = document.getElementById('header-sub');
   if (headerTitle) {
-    headerTitle.textContent = dailyInfo
-      ? `${dailyInfo.themeName} · ${run.dayKey}`
-      : `Dice Chess Daily · ${run.dayKey}`;
+    const themeName =
+      dailyInfo && dailyInfo.dayKey === run.dayKey
+        ? dailyInfo.themeName
+        : getDailyThemeName(run.openingRoll);
+    headerTitle.textContent = `${themeName} · ${run.dayKey}`;
   }
   if (headerSub) {
     const diceSymbols = run.openingRoll
@@ -264,15 +327,15 @@ function renderAll(): void {
 
   renderLadderStrip(run);
 
-  const viewGame = document.getElementById('view-game');
-  const viewBetween = document.getElementById('view-between');
-  const viewFinished = document.getElementById('view-finished');
-  viewGame?.classList.toggle('hidden', run.status !== 'in_game');
-  viewBetween?.classList.toggle(
-    'hidden',
-    run.status !== 'paused_between_games',
-  );
-  viewFinished?.classList.toggle('hidden', run.status !== 'finished');
+  document
+    .getElementById('view-game')
+    ?.classList.toggle('hidden', run.status !== 'in_game');
+  document
+    .getElementById('view-between')
+    ?.classList.toggle('hidden', run.status !== 'paused_between_games');
+  document
+    .getElementById('view-finished')
+    ?.classList.toggle('hidden', run.status !== 'finished');
 
   if (run.status === 'in_game' && run.activeGame) {
     renderActiveGame(run);
@@ -341,6 +404,137 @@ function renderActiveGame(run: RunState): void {
   updateClockDisplay();
 }
 
+function buildLegalTargetLookup(
+  legalNextMoves: readonly string[],
+): Map<string, string[]> {
+  const legalTargets = new Map<string, string[]>();
+  if (!selectedSquare) return legalTargets;
+
+  for (const move of legalNextMoves) {
+    if (move.startsWith(selectedSquare)) {
+      const dest = move.slice(2, 4);
+      const list = legalTargets.get(dest) ?? [];
+      list.push(move);
+      legalTargets.set(dest, list);
+    }
+  }
+  return legalTargets;
+}
+
+function buildLastMoveSquares(lastBotMoves: readonly string[]): Set<string> {
+  const squares = new Set<string>();
+  const highlightList = pendingMoves.length > 0 ? pendingMoves : lastBotMoves;
+  for (const mv of highlightList) {
+    squares.add(mv.slice(0, 2));
+    squares.add(mv.slice(2, 4));
+  }
+  return squares;
+}
+
+function formatTargetDescription(
+  matchingMoves: readonly string[] | undefined,
+  piece: string | undefined,
+): string {
+  if (!matchingMoves || matchingMoves.length === 0) return '';
+  return piece?.toLowerCase() === 'k' ? 'capture King' : 'legal move';
+}
+
+function appendSquareDecorations(params: {
+  readonly btn: HTMLButtonElement;
+  readonly piece: string | undefined;
+  readonly file: string;
+  readonly rank: number;
+  readonly showRank: boolean;
+  readonly showFile: boolean;
+}): void {
+  const { btn, piece, file, rank, showRank, showFile } = params;
+  if (piece) {
+    const color = piece === piece.toUpperCase() ? 'w' : 'b';
+    const img = document.createElement('img');
+    img.src = `/pieces/${color}${piece.toUpperCase()}.svg`;
+    img.alt = '';
+    img.draggable = false;
+    btn.appendChild(img);
+  }
+  if (showRank) {
+    const rankLabel = document.createElement('span');
+    rankLabel.className = 'coord rank';
+    rankLabel.setAttribute('aria-hidden', 'true');
+    rankLabel.textContent = String(rank);
+    btn.appendChild(rankLabel);
+  }
+  if (showFile) {
+    const fileLabel = document.createElement('span');
+    fileLabel.className = 'coord file';
+    fileLabel.setAttribute('aria-hidden', 'true');
+    fileLabel.textContent = file;
+    btn.appendChild(fileLabel);
+  }
+}
+
+function createBoardSquareButton(params: {
+  readonly file: string;
+  readonly rank: number;
+  readonly showRank: boolean;
+  readonly showFile: boolean;
+  readonly piece: string | undefined;
+  readonly highlightedLastSquares: ReadonlySet<string>;
+  readonly legalOrigins: ReadonlySet<string>;
+  readonly legalTargets: ReadonlyMap<string, string[]>;
+}): HTMLButtonElement {
+  const {
+    file,
+    rank,
+    piece,
+    highlightedLastSquares,
+    legalOrigins,
+    legalTargets,
+  } = params;
+  const sqName = `${file}${rank}`;
+  const fileNum = FILES.indexOf(file as (typeof FILES)[number]);
+  const isDark = (fileNum + rank) % 2 === 1;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = isDark ? 'sq dark' : 'sq';
+  btn.dataset.square = sqName;
+  btn.setAttribute('role', 'gridcell');
+
+  if (highlightedLastSquares.has(sqName)) btn.classList.add('last-move');
+  if (selectedSquare === sqName) btn.classList.add('selected');
+  if (!selectedSquare && legalOrigins.has(sqName)) {
+    btn.classList.add('legal-origin');
+  }
+
+  const matchingMoves = legalTargets.get(sqName);
+  if (matchingMoves && matchingMoves.length > 0) {
+    btn.classList.add('legal-target');
+    if (piece) btn.classList.add('legal-capture');
+    if (piece?.toLowerCase() === 'k') btn.classList.add('king-target');
+  }
+
+  appendSquareDecorations({
+    btn,
+    piece,
+    file,
+    rank,
+    showRank: params.showRank,
+    showFile: params.showFile,
+  });
+
+  const targetDesc = formatTargetDescription(matchingMoves, piece);
+  btn.setAttribute(
+    'aria-label',
+    [sqName, piece ? describePiece(piece) : 'empty', targetDesc]
+      .filter(Boolean)
+      .join(' '),
+  );
+  btn.addEventListener('click', () => {
+    onSquareTap(sqName, legalOrigins, legalTargets);
+  });
+  return btn;
+}
+
 function renderBoard(
   turnView: TurnView,
   playerColor: 'w' | 'b',
@@ -348,30 +542,21 @@ function renderBoard(
 ): void {
   const boardEl = document.getElementById('board');
   if (!boardEl) return;
+
+  const activeEl = document.activeElement;
+  const focusedSquare =
+    activeEl instanceof HTMLElement && boardEl.contains(activeEl)
+      ? activeEl.dataset.square
+      : undefined;
+
   boardEl.replaceChildren();
 
   const parsed = parseFenBoard(turnView.boardFen);
   const legalOrigins = new Set(
     turnView.legalNextMoves.map((move) => move.slice(0, 2)),
   );
-  const legalTargets = new Map<string, string[]>();
-  if (selectedSquare) {
-    for (const move of turnView.legalNextMoves) {
-      if (move.startsWith(selectedSquare)) {
-        const dest = move.slice(2, 4);
-        const list = legalTargets.get(dest) ?? [];
-        list.push(move);
-        legalTargets.set(dest, list);
-      }
-    }
-  }
-
-  const highlightedLastSquares = new Set<string>();
-  const highlightList = pendingMoves.length > 0 ? pendingMoves : lastBotMoves;
-  for (const mv of highlightList) {
-    highlightedLastSquares.add(mv.slice(0, 2));
-    highlightedLastSquares.add(mv.slice(2, 4));
-  }
+  const legalTargets = buildLegalTargetLookup(turnView.legalNextMoves);
+  const highlightedLastSquares = buildLastMoveSquares(lastBotMoves);
 
   const ranks =
     playerColor === 'w' ? [8, 7, 6, 5, 4, 3, 2, 1] : [1, 2, 3, 4, 5, 6, 7, 8];
@@ -381,72 +566,27 @@ function renderBoard(
     const rank = ranks[rIdx]!;
     for (let fIdx = 0; fIdx < files.length; fIdx += 1) {
       const file = files[fIdx]!;
-      const sqName = `${file}${rank}`;
-      const fileNum = FILES.indexOf(file);
-      const isDark = (fileNum + rank) % 2 === 1;
-      const piece = parsed.pieces.get(sqName);
-
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = isDark ? 'sq dark' : 'sq';
-      btn.dataset.square = sqName;
-      btn.setAttribute('role', 'gridcell');
-
-      if (highlightedLastSquares.has(sqName)) btn.classList.add('last-move');
-      if (selectedSquare === sqName) btn.classList.add('selected');
-      if (!selectedSquare && legalOrigins.has(sqName)) {
-        btn.classList.add('legal-origin');
-      }
-
-      const matchingMoves = legalTargets.get(sqName);
-      if (matchingMoves && matchingMoves.length > 0) {
-        btn.classList.add('legal-target');
-        if (piece) btn.classList.add('legal-capture');
-        if (piece?.toLowerCase() === 'k') btn.classList.add('king-target');
-      }
-
-      if (piece) {
-        const color = piece === piece.toUpperCase() ? 'w' : 'b';
-        const img = document.createElement('img');
-        img.src = `/pieces/${color}${piece.toUpperCase()}.svg`;
-        img.alt = '';
-        img.draggable = false;
-        btn.appendChild(img);
-      }
-
-      if (fIdx === 0) {
-        const rankLabel = document.createElement('span');
-        rankLabel.className = 'coord rank';
-        rankLabel.setAttribute('aria-hidden', 'true');
-        rankLabel.textContent = String(rank);
-        btn.appendChild(rankLabel);
-      }
-      if (rIdx === ranks.length - 1) {
-        const fileLabel = document.createElement('span');
-        fileLabel.className = 'coord file';
-        fileLabel.setAttribute('aria-hidden', 'true');
-        fileLabel.textContent = file;
-        btn.appendChild(fileLabel);
-      }
-
-      const targetDesc =
-        matchingMoves && matchingMoves.length > 0
-          ? piece?.toLowerCase() === 'k'
-            ? 'capture King'
-            : 'legal move'
-          : '';
-      btn.setAttribute(
-        'aria-label',
-        [sqName, piece ? describePiece(piece) : 'empty', targetDesc]
-          .filter(Boolean)
-          .join(' '),
+      boardEl.appendChild(
+        createBoardSquareButton({
+          file,
+          rank,
+          showRank: fIdx === 0,
+          showFile: rIdx === ranks.length - 1,
+          piece: parsed.pieces.get(`${file}${rank}`),
+          highlightedLastSquares,
+          legalOrigins,
+          legalTargets,
+        }),
       );
-
-      btn.addEventListener('click', () => {
-        onSquareTap(sqName, legalOrigins, legalTargets);
-      });
-      boardEl.appendChild(btn);
     }
+  }
+
+  if (focusedSquare) {
+    boardEl
+      .querySelector<HTMLButtonElement>(
+        `button[data-square="${focusedSquare}"]`,
+      )
+      ?.focus();
   }
 }
 
@@ -466,6 +606,8 @@ function onSquareTap(
     openPromotionPicker(
       targetMoves,
       currentRun.activeGame.opponent.playerColor,
+      currentRun.activeGame.gameInstanceId,
+      currentRun.activeGame.plyNumber,
     );
     return;
   }
@@ -482,7 +624,12 @@ function onSquareTap(
   }
 }
 
-function openPromotionPicker(moves: readonly string[], side: 'w' | 'b'): void {
+function openPromotionPicker(
+  moves: readonly string[],
+  side: 'w' | 'b',
+  expectedGameInstanceId: string,
+  expectedPlyNumber: number,
+): void {
   const dialog = document.getElementById(
     'promo-dialog',
   ) as HTMLDialogElement | null;
@@ -504,6 +651,15 @@ function openPromotionPicker(moves: readonly string[], side: 'w' | 'b'): void {
     btn.append(img, label);
     btn.addEventListener('click', () => {
       dialog.close();
+      const active = currentRun?.activeGame;
+      if (
+        isSubmitting ||
+        currentRun?.status !== 'in_game' ||
+        active?.gameInstanceId !== expectedGameInstanceId ||
+        active?.plyNumber !== expectedPlyNumber
+      ) {
+        return;
+      }
       applyLocalMicroMove(match);
     });
     grid.appendChild(btn);
@@ -526,7 +682,7 @@ function applyLocalMicroMove(uci: string): void {
   const captured = parsedBefore.pieces.get(uci.slice(2, 4));
   const isCastle =
     movingPiece?.toLowerCase() === 'k' &&
-    Math.abs(uci.charCodeAt(0) - uci.charCodeAt(2)) === 2;
+    Math.abs((uci.codePointAt(0) ?? 0) - (uci.codePointAt(2) ?? 0)) === 2;
 
   pendingMoves = [...pendingMoves, uci];
   selectedSquare = null;
@@ -607,6 +763,29 @@ function renderTurnActions(turnView: TurnView): void {
   }
 }
 
+async function reconcileRunFromServer(): Promise<boolean> {
+  const capturedEpoch = runUpdateEpoch;
+  try {
+    const preview = await refreshDailyPreviewState();
+    if (capturedEpoch !== runUpdateEpoch) {
+      return false;
+    }
+    const serverRun = preview?.activeRun;
+    if (
+      serverRun &&
+      currentRun &&
+      (serverRun.runId !== currentRun.runId ||
+        serverRun.revision > currentRun.revision)
+    ) {
+      applyRunUpdate(serverRun, preview?.serverNowMs);
+      return true;
+    }
+  } catch {
+    // Keep local view if recovery check also fails.
+  }
+  return false;
+}
+
 async function submitPendingTurn(): Promise<void> {
   if (isSubmitting || !currentRun?.activeGame) return;
   const active = currentRun.activeGame;
@@ -625,25 +804,12 @@ async function submitPendingTurn(): Promise<void> {
     const rsp = await postJson<SubmitTurnRsp>(Endpoint.SubmitTurn, {
       guestId: getOrCreateGuestId(),
       runId: currentRun.runId,
+      gameInstanceId: active.gameInstanceId,
       plyNumber: active.plyNumber,
       moves: pendingMoves,
     });
 
-    if (rsp.stageOutcome === 'win') {
-      playSoundCue('game_win');
-      lastOutcomeText = `Victory vs ${active.opponent.boss.name}!`;
-    } else if (rsp.stageOutcome === 'draw') {
-      playSoundCue('game_draw');
-      lastOutcomeText = `Draw vs ${active.opponent.boss.name} — Streak Held! Replay Stage ${active.stage}`;
-    } else if (rsp.stageOutcome === 'loss') {
-      playSoundCue('game_loss');
-      lastOutcomeText =
-        rsp.outcomeReason === 'timeout'
-          ? 'Time Expired!'
-          : `${active.opponent.boss.name} captured your King!`;
-    } else {
-      playSoundCue('dice_roll');
-    }
+    playOutcomeAudioAndSetLabel(rsp, active.opponent.boss.name);
 
     if (dailyInfo) {
       dailyInfo = {
@@ -653,13 +819,37 @@ async function submitPendingTurn(): Promise<void> {
       };
     }
 
-    applyRunUpdate(rsp.run);
+    // Clear before applying update so controls (e.g., Forced Pass) re-render enabled immediately.
+    isSubmitting = false;
+    applyRunUpdate(rsp.run, rsp.serverNowMs);
   } catch (err) {
     console.error('Turn submit error', err);
     isSubmitting = false;
-    renderAll();
-  } finally {
-    isSubmitting = false;
+    const reconciled = await reconcileRunFromServer();
+    if (!reconciled) {
+      renderAll();
+    }
+  }
+}
+
+function playOutcomeAudioAndSetLabel(
+  rsp: SubmitTurnRsp,
+  bossName: string,
+): void {
+  if (rsp.stageOutcome === 'win') {
+    playSoundCue('game_win');
+    lastOutcomeText = `Victory vs ${bossName}!`;
+  } else if (rsp.stageOutcome === 'draw') {
+    playSoundCue('game_draw');
+    lastOutcomeText = `Draw vs ${bossName} — Streak Held! Replay Stage ${rsp.run.currentStage}`;
+  } else if (rsp.stageOutcome === 'loss') {
+    playSoundCue('game_loss');
+    lastOutcomeText =
+      rsp.outcomeReason === 'timeout'
+        ? 'Time Expired!'
+        : `${bossName} captured your King!`;
+  } else {
+    playSoundCue('dice_roll');
   }
 }
 
@@ -699,15 +889,11 @@ function renderBetweenGames(run: RunState): void {
   }
 }
 
-function renderFinished(run: RunState): void {
+function renderFinishedSummary(run: RunState): void {
   const titleEl = document.getElementById('finish-title');
   const summaryEl = document.getElementById('finish-summary');
   const huntEl = document.getElementById('finish-hunt');
   const cardEl = document.getElementById('finish-card');
-  const nickBox = document.getElementById('guest-nick-box');
-  const nickInput = document.getElementById(
-    'guest-nick-input',
-  ) as HTMLInputElement | null;
 
   if (titleEl) titleEl.textContent = lastOutcomeText || 'Gauntlet Complete';
   if (summaryEl) {
@@ -721,12 +907,23 @@ function renderFinished(run: RunState): void {
   if (cardEl) {
     cardEl.textContent = run.shareCardText ?? '';
   }
-  if (nickBox && nickInput) {
-    nickBox.classList.toggle('hidden', !run.isGuest);
-    if (run.isGuest && !nickInput.value) {
-      nickInput.value = getGuestNickname();
-    }
+}
+
+function renderFinishedGuestBox(run: RunState): void {
+  const nickBox = document.getElementById('guest-nick-box');
+  const nickInput = document.getElementById(
+    'guest-nick-input',
+  ) as HTMLInputElement | null;
+  if (!nickBox || !nickInput) return;
+  nickBox.classList.toggle('hidden', !run.isGuest);
+  if (run.isGuest && !nickInput.value) {
+    nickInput.value = getGuestNickname();
   }
+}
+
+function renderFinished(run: RunState): void {
+  renderFinishedSummary(run);
+  renderFinishedGuestBox(run);
 }
 
 function formatEpitaph(
@@ -754,11 +951,11 @@ async function handleStartOrAdvance(forceNew: boolean): Promise<void> {
     });
     lastOutcomeText = '';
     playSoundCue('dice_roll');
-    applyRunUpdate(rsp.run);
-  } catch (err) {
-    console.error('Failed to start/advance run', err);
-  } finally {
     isSubmitting = false;
+    applyRunUpdate(rsp.run, rsp.serverNowMs);
+  } catch (err) {
+    isSubmitting = false;
+    console.error('Failed to start/advance run', err);
   }
 }
 
@@ -789,11 +986,11 @@ async function handleResign(): Promise<void> {
     });
     lastOutcomeText = 'Run Resigned';
     playSoundCue('game_loss');
+    isSubmitting = false;
     applyRunUpdate(rsp.run);
   } catch (err) {
-    console.error('Resign failed', err);
-  } finally {
     isSubmitting = false;
+    console.error('Resign failed', err);
   }
 }
 
@@ -834,15 +1031,24 @@ async function openLeaderboards(
   dialog: HTMLDialogElement | null,
 ): Promise<void> {
   if (!dialog) return;
+  leaderboardLoadError = false;
   dialog.showModal();
   try {
-    const rsp = await fetch(`/${Endpoint.GetLeaderboards}`);
-    if (rsp.ok) {
-      cachedLeaderboards = (await rsp.json()) as GetLeaderboardsRsp;
+    const guestId = getOrCreateGuestId();
+    const rsp = await fetch(
+      `/${Endpoint.GetLeaderboards}?guestId=${encodeURIComponent(guestId)}`,
+    );
+    if (!rsp.ok) {
+      leaderboardLoadError = true;
       renderLeaderboardTable();
+      return;
     }
+    cachedLeaderboards = (await rsp.json()) as LeaderboardsBundle;
+    renderLeaderboardTable();
   } catch (err) {
     console.warn('Could not load leaderboards', err);
+    leaderboardLoadError = true;
+    renderLeaderboardTable();
   }
 }
 
@@ -859,7 +1065,9 @@ function renderLeaderboardTable(): void {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = 4;
-    td.textContent = 'No scores recorded for this period yet.';
+    td.textContent = leaderboardLoadError
+      ? 'Could not load leaderboards right now.'
+      : 'No scores recorded for this period yet.';
     tr.appendChild(td);
     tbody.appendChild(tr);
     return;
@@ -867,7 +1075,7 @@ function renderLeaderboardTable(): void {
 
   entries.forEach((entry, idx) => {
     const tr = document.createElement('tr');
-    if (currentRun && entry.playerKey === currentRun.playerKey) {
+    if (entry.isViewer) {
       tr.className = 'me';
     }
     const c1 = document.createElement('td');
@@ -884,16 +1092,12 @@ function renderLeaderboardTable(): void {
 }
 
 function updateClockDisplay(): void {
-  if (
-    !currentRun ||
-    currentRun.status !== 'in_game' ||
-    !currentRun.activeGame
-  ) {
+  if (currentRun?.status !== 'in_game' || !currentRun.activeGame) {
     return;
   }
   const active = currentRun.activeGame;
   const elapsedMs =
-    clockElapsedAtSyncMs + Math.max(0, Date.now() - clockBaseLocalMs);
+    clockElapsedAtSyncMs + Math.max(0, performance.now() - clockBasePerfMs);
   const remainingMs = Math.max(0, active.playerRemainingMs - elapsedMs);
 
   const playerClockEl = document.getElementById('player-clock');
@@ -908,18 +1112,30 @@ function updateClockDisplay(): void {
 
   if (remainingMs === 0 && !isSubmitting && !autoTimeoutTriggered) {
     autoTimeoutTriggered = true;
-    void postJson<SubmitTurnRsp>(Endpoint.SubmitTurn, {
-      guestId: getOrCreateGuestId(),
-      runId: currentRun.runId,
-      plyNumber: active.plyNumber,
-      moves: [],
-    })
-      .then((rsp) => {
-        playSoundCue('game_loss');
-        lastOutcomeText = 'Time Expired!';
-        applyRunUpdate(rsp.run);
+    const expectedEpoch = runUpdateEpoch;
+    void refreshDailyPreviewState()
+      .then((preview) => {
+        if (expectedEpoch !== runUpdateEpoch) return;
+        const serverRun = preview?.activeRun;
+        if (
+          serverRun &&
+          currentRun &&
+          (serverRun.runId !== currentRun.runId ||
+            serverRun.revision > currentRun.revision ||
+            serverRun.status === 'finished')
+        ) {
+          if (serverRun.status === 'finished') {
+            playSoundCue('game_loss');
+            lastOutcomeText = 'Time Expired!';
+          }
+          applyRunUpdate(serverRun, preview?.serverNowMs);
+          return;
+        }
+        autoTimeoutTriggered = false;
       })
-      .catch(() => {});
+      .catch(() => {
+        autoTimeoutTriggered = false;
+      });
   }
 }
 
@@ -949,4 +1165,4 @@ async function postJson<T>(endpoint: string, body: unknown): Promise<T> {
   return (await rsp.json()) as T;
 }
 
-void init();
+await init();

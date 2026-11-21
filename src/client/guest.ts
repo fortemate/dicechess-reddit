@@ -1,42 +1,66 @@
 const GUEST_ID_KEY = 'dicechess_daily_guest_id';
 const GUEST_NICK_KEY = 'dicechess_daily_guest_nick';
 const GUIDE_DISMISSED_KEY = 'dicechess_daily_guide_dismissed';
+const GUEST_ID_RE = /^[a-zA-Z0-9_-]{8,64}$/;
+
+let memoryGuestId: string | null = null;
+let memoryGuestNick: string | null = null;
+
+function generateFreshGuestId(): string {
+  if (
+    typeof crypto !== 'undefined' &&
+    typeof crypto.randomUUID === 'function'
+  ) {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return `g_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
 
 export function getOrCreateGuestId(): string {
   try {
     const existing = window.localStorage.getItem(GUEST_ID_KEY);
-    if (existing && /^[a-zA-Z0-9_-]{4,64}$/.test(existing)) {
+    if (existing && GUEST_ID_RE.test(existing)) {
+      memoryGuestId = existing;
       return existing;
     }
-    const fresh =
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `g_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const fresh = memoryGuestId ?? generateFreshGuestId();
+    memoryGuestId = fresh;
     window.localStorage.setItem(GUEST_ID_KEY, fresh);
     return fresh;
   } catch {
-    return 'guest_local';
+    memoryGuestId ??= generateFreshGuestId();
+    return memoryGuestId;
   }
 }
 
 export function getGuestNickname(): string {
+  if (memoryGuestNick !== null) {
+    return memoryGuestNick;
+  }
   try {
-    return window.localStorage.getItem(GUEST_NICK_KEY) ?? '';
+    const stored = window.localStorage.getItem(GUEST_NICK_KEY);
+    memoryGuestNick = stored ?? '';
+    return memoryGuestNick;
   } catch {
     return '';
   }
 }
 
-export function setGuestNickname(nick: string): void {
+/** Saves guest nickname to session memory and `localStorage`, returning storage persistence success. */
+export function setGuestNickname(nick: string): boolean {
+  const trimmed = nick.trim().slice(0, 24);
+  memoryGuestNick = trimmed;
   try {
-    const trimmed = nick.trim().slice(0, 24);
     if (trimmed) {
       window.localStorage.setItem(GUEST_NICK_KEY, trimmed);
     } else {
       window.localStorage.removeItem(GUEST_NICK_KEY);
     }
+    return true;
   } catch {
-    // Ignore storage restriction errors.
+    return false;
   }
 }
 

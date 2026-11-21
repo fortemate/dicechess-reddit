@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { once } from 'node:events';
+import { randomInt, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { context, reddit } from '@devvit/web/server';
 import type { TriggerResponse, UiResponse } from '@devvit/web/shared';
@@ -9,12 +8,11 @@ import {
   type ActiveGameSnapshot,
   type ErrorRsp,
   type GetDailyStateRsp,
-  type GetLeaderboardsRsp,
+  type LeaderboardsBundle,
   type PauseRunReq,
   type PauseRunRsp,
   type ResignRunReq,
   type ResignRunRsp,
-  type RunState,
   type ShareCommentReq,
   type ShareCommentRsp,
   type StageChronicleEntry,
@@ -47,11 +45,11 @@ import {
   type GameTerminalResult,
 } from '../shared/engine.ts';
 import {
-  dbClaimAttempt,
+  dbClaimOrCreateRun,
   dbGetActiveRun,
   dbGetAttemptCount,
   dbGetCommunityHuntCount,
-  dbGetDailyRank,
+  dbGetCurrentRunId,
   dbGetLeaderboards,
   dbGetRunById,
   dbGetStageEpitaph,
@@ -60,11 +58,15 @@ import {
   dbRecordLeaderboardRun,
   dbRecordStageAttempt,
   dbRecordStageDeath,
-  dbSaveRun,
+  dbSaveRunCas,
   DEFAULT_HUNT_TARGET,
   resolvePlayerIdentity,
+  toPublicRunState,
   type PlayerIdentity,
+  type StoredRunState,
 } from './db.ts';
+
+const MAX_BODY_BYTES = 64 * 1024;
 
 export interface ServerDeps {
   readonly now: () => number;
@@ -73,12 +75,12 @@ export interface ServerDeps {
 
 const DEFAULT_DEPS: ServerDeps = {
   now: () => Date.now(),
-  random: () => Math.random(),
+  random: () => randomInt(0, 0x100000000) / 0x100000000,
 };
 
 type AnyRsp =
   | GetDailyStateRsp
-  | GetLeaderboardsRsp
+  | LeaderboardsBundle
   | StartRunRsp
   | SubmitTurnRsp
   | PauseRunRsp
@@ -117,9 +119,12 @@ export function createAppHandler(overrides?: Partial<ServerDeps>) {
         );
         return;
       }
-      const msg = `server error; ${err instanceof Error ? err.stack : err}`;
-      console.error(msg);
-      writeJson(500, { error: msg, status: 500 } satisfies ErrorRsp, rspMsg);
+      console.error('Unhandled server error:', err);
+      writeJson(
+        500,
+        { error: 'internal server error', status: 500 } satisfies ErrorRsp,
+        rspMsg,
+      );
     }
   };
 }
@@ -140,48 +145,53 @@ async function route(
   if (!method || method !== reqMsg.method) {
     rsp = { error: 'not found', status: 404 };
   } else {
-    switch (endpoint) {
-      case Endpoint.GetDailyState:
-        rsp = await routeGetDailyState(parsedUrl, deps);
-        break;
-      case Endpoint.GetLeaderboards:
-        rsp = await dbGetLeaderboards(deps.now());
-        break;
-      case Endpoint.StartRun:
-        rsp = await routeStartRun(await readJson<StartRunReq>(reqMsg), deps);
-        break;
-      case Endpoint.SubmitTurn:
-        rsp = await routeSubmitTurn(
-          await readJson<SubmitTurnReq>(reqMsg),
-          deps,
-        );
-        break;
-      case Endpoint.PauseRun:
-        rsp = await routePauseRun(await readJson<PauseRunReq>(reqMsg), deps);
-        break;
-      case Endpoint.ResignRun:
-        rsp = await routeResignRun(await readJson<ResignRunReq>(reqMsg), deps);
-        break;
-      case Endpoint.ShareComment:
-        rsp = await routeShareComment(await readJson<ShareCommentReq>(reqMsg));
-        break;
-      case Endpoint.OnMenuNewPost:
-        await drainRequestBody(reqMsg);
-        rsp = await routeMenuNewPost(deps);
-        break;
-      case Endpoint.OnAppInstall:
-        await drainRequestBody(reqMsg);
-        rsp = await routeAppInstall(deps);
-        break;
-      default:
-        endpoint satisfies never;
-        rsp = { error: 'not found', status: 404 };
-        break;
-    }
+    rsp = await dispatchEndpoint(endpoint, parsedUrl, reqMsg, deps);
   }
 
   const status = 'status' in rsp ? rsp.status : 200;
   writeJson(status, rsp, rspMsg);
+}
+
+async function dispatchEndpoint(
+  endpoint: Endpoint,
+  parsedUrl: URL,
+  reqMsg: IncomingMessage,
+  deps: ServerDeps,
+): Promise<AnyRsp> {
+  switch (endpoint) {
+    case Endpoint.GetDailyState:
+      return routeGetDailyState(parsedUrl, deps);
+    case Endpoint.GetLeaderboards:
+      return routeGetLeaderboards(parsedUrl, deps);
+    case Endpoint.StartRun:
+      return routeStartRun(await readJson<StartRunReq>(reqMsg), deps);
+    case Endpoint.SubmitTurn:
+      return routeSubmitTurn(await readJson<SubmitTurnReq>(reqMsg), deps);
+    case Endpoint.PauseRun:
+      return routePauseRun(await readJson<PauseRunReq>(reqMsg), deps);
+    case Endpoint.ResignRun:
+      return routeResignRun(await readJson<ResignRunReq>(reqMsg), deps);
+    case Endpoint.ShareComment:
+      return routeShareComment(await readJson<ShareCommentReq>(reqMsg));
+    case Endpoint.OnMenuNewPost:
+      await drainRequestBody(reqMsg);
+      return routeMenuNewPost(deps);
+    case Endpoint.OnAppInstall:
+      await drainRequestBody(reqMsg);
+      return routeAppInstall(deps);
+    default:
+      endpoint satisfies never;
+      return { error: 'not found', status: 404 };
+  }
+}
+
+async function routeGetLeaderboards(
+  url: URL,
+  deps: ServerDeps,
+): Promise<LeaderboardsBundle> {
+  const guestId = url.searchParams.get('guestId') ?? undefined;
+  const identity = currentIdentity(guestId);
+  return dbGetLeaderboards(deps.now(), identity.playerKey);
 }
 
 async function routeGetDailyState(
@@ -195,25 +205,21 @@ async function routeGetDailyState(
   const guestId = url.searchParams.get('guestId') ?? undefined;
   const identity = currentIdentity(guestId);
 
-  const [
-    communityHuntCount,
-    leaderboards,
-    stageEpitaphs,
-    attemptsToday,
-    existingRun,
-  ] = await Promise.all([
-    dbGetCommunityHuntCount(dayKey),
-    dbGetLeaderboards(nowMs),
-    dbGetStageEpitaphs(dayKey),
-    dbGetAttemptCount(dayKey, identity.playerKey),
-    dbGetActiveRun(dayKey, identity.playerKey),
-  ]);
-
+  const existingRun = await dbGetActiveRun(dayKey, identity.playerKey);
   const syncedRun = existingRun
     ? await syncClockExpiration(existingRun, deps)
     : null;
 
+  const [communityHuntCount, leaderboards, stageEpitaphs, attemptsToday] =
+    await Promise.all([
+      dbGetCommunityHuntCount(dayKey),
+      dbGetLeaderboards(nowMs, identity.playerKey),
+      dbGetStageEpitaphs(dayKey),
+      dbGetAttemptCount(dayKey, identity.playerKey),
+    ]);
+
   return {
+    serverNowMs: deps.now(),
     dayKey,
     themeName: getDailyThemeName(openingRoll),
     openingRoll,
@@ -227,7 +233,7 @@ async function routeGetDailyState(
     playerUsername: identity.username,
     isGuest: identity.isGuest,
     attemptsToday,
-    activeRun: syncedRun,
+    activeRun: syncedRun ? toPublicRunState(syncedRun) : null,
   };
 }
 
@@ -235,69 +241,100 @@ async function routeStartRun(
   req: StartRunReq,
   deps: ServerDeps,
 ): Promise<StartRunRsp> {
+  if (req.forceNew !== undefined && typeof req.forceNew !== 'boolean') {
+    throw new HttpError(400, 'forceNew must be a boolean');
+  }
+  const identity = currentIdentity(req.guestId, req.guestNickname);
+  assertValidMutatingIdentity(identity);
+
   const nowMs = deps.now();
   const dayKey = utcDayKey(nowMs);
-  const identity = currentIdentity(req.guestId, req.guestNickname);
-
-  const existing = await dbGetActiveRun(dayKey, identity.playerKey);
-  if (existing && !req.forceNew) {
-    const synced = await syncClockExpiration(existing, deps);
-    if (synced.status === 'in_game') {
-      return { run: synced, resumed: true };
-    }
-    if (synced.status === 'paused_between_games') {
-      const launched = await launchStageIntoRun(synced, deps);
-      await dbSaveRun(launched);
-      return { run: launched, resumed: true };
-    }
-  }
-
-  if (existing && req.forceNew && existing.status === 'in_game') {
-    await finalizeLossRun(
-      existing,
-      existing.activeGame?.playerTurnCount ?? 0,
-      'resigned',
-      deps,
-    );
-  }
-
   const openingRoll = getDailyOpeningRoll(dayKey);
-  const { attemptNumber, firstTry } = await dbClaimAttempt(
-    dayKey,
-    identity.playerKey,
-  );
-  const freshRun: RunState = {
-    runId: randomUUID(),
+
+  const claim = await dbClaimOrCreateRun({
     dayKey,
     playerKey: identity.playerKey,
-    username: identity.username,
-    isGuest: identity.isGuest,
-    attemptNumber,
-    firstTry,
-    openingRoll,
-    status: 'paused_between_games',
-    currentStage: 1,
-    wins: 0,
-    totalTurns: 0,
-    chronicle: [],
-    activeGame: null,
-    startedAtMs: nowMs,
-    updatedAtMs: nowMs,
-  };
+    forceNew: Boolean(req.forceNew),
+    onRetireExistingRun: async (existingRun) => {
+      if (existingRun.status === 'in_game') {
+        await finalizeLossRun(
+          existingRun,
+          existingRun.activeGame?.playerTurnCount ?? 0,
+          'resigned',
+          deps,
+        );
+      } else if (existingRun.status === 'paused_between_games') {
+        await retirePausedRunWithoutDeath(existingRun, deps);
+      }
+    },
+    buildNewRun: (attemptNumber, firstTry) => {
+      const freshRun: StoredRunState = {
+        runId: randomUUID(),
+        revision: 0,
+        dayKey,
+        playerKey: identity.playerKey,
+        username: identity.username,
+        isGuest: identity.isGuest,
+        attemptNumber,
+        firstTry,
+        openingRoll,
+        status: 'paused_between_games',
+        currentStage: 1,
+        wins: 0,
+        totalTurns: 0,
+        chronicle: [],
+        activeGame: null,
+        startedAtMs: nowMs,
+        updatedAtMs: nowMs,
+      };
+      return prepareStageLaunch(freshRun, deps, 1);
+    },
+  });
 
-  const startedRun = await launchStageIntoRun(freshRun, deps);
-  await dbSaveRun(startedRun);
-  return { run: startedRun, resumed: false };
+  if (claim.kind === 'created') {
+    await dbRecordStageAttempt(claim.run.dayKey, claim.run.currentStage);
+    return {
+      serverNowMs: deps.now(),
+      run: toPublicRunState(claim.run),
+      resumed: false,
+    };
+  }
+
+  const synced = await syncClockExpiration(claim.run, deps);
+  if (synced.status !== 'paused_between_games') {
+    return {
+      serverNowMs: deps.now(),
+      run: toPublicRunState(synced),
+      resumed: true,
+    };
+  }
+
+  const launched = prepareStageLaunch(synced, deps, synced.revision + 1);
+  const cas = await dbSaveRunCas(launched, synced.revision);
+  if (!cas.committed || !cas.run) {
+    if (cas.run) {
+      return {
+        serverNowMs: deps.now(),
+        run: toPublicRunState(cas.run),
+        resumed: true,
+      };
+    }
+    throw new HttpError(409, 'Run state changed concurrently; please retry');
+  }
+  await dbRecordStageAttempt(cas.run.dayKey, cas.run.currentStage);
+  return {
+    serverNowMs: deps.now(),
+    run: toPublicRunState(cas.run),
+    resumed: true,
+  };
 }
 
-async function launchStageIntoRun(
-  run: RunState,
+function prepareStageLaunch(
+  run: StoredRunState,
   deps: ServerDeps,
-): Promise<RunState> {
-  const nowMs = deps.now();
+  targetRevision: number,
+): StoredRunState {
   const opponent = getStageOpponent(run.currentStage);
-  await dbRecordStageAttempt(run.dayKey, run.currentStage, opponent.boss.id);
-
   let baseFen = STANDARD_START_FEN;
   let plyNumber = 1;
   let lastBotMoves: string[] = [];
@@ -336,7 +373,10 @@ async function launchStageIntoRun(
   }
 
   const currentRoll = rollForTurn(plyNumber, run.openingRoll, deps.random);
+  // Sample clock timestamp AFTER bot computation so bot thinking is never billed to the player.
+  const turnStartedAtMs = deps.now();
   const activeGame: ActiveGameSnapshot = {
+    gameInstanceId: `${run.runId}:s${run.currentStage}:g${targetRevision}`,
     stage: run.currentStage,
     opponent,
     baseFen,
@@ -345,7 +385,7 @@ async function launchStageIntoRun(
     currentRoll,
     playerRemainingMs: INITIAL_CLOCK_MS,
     botRemainingMs: INITIAL_CLOCK_MS,
-    turnStartedAtMs: nowMs,
+    turnStartedAtMs,
     lastBotMoves,
     botLine,
   };
@@ -355,7 +395,7 @@ async function launchStageIntoRun(
     ...rest,
     status: 'in_game',
     activeGame,
-    updatedAtMs: nowMs,
+    updatedAtMs: turnStartedAtMs,
   };
 }
 
@@ -363,16 +403,27 @@ async function routeSubmitTurn(
   req: SubmitTurnReq,
   deps: ServerDeps,
 ): Promise<SubmitTurnRsp> {
-  if (!req.runId || !Array.isArray(req.moves)) {
-    throw new HttpError(400, 'Missing runId or moves');
+  if (
+    !req.runId ||
+    typeof req.gameInstanceId !== 'string' ||
+    !Array.isArray(req.moves)
+  ) {
+    throw new HttpError(400, 'Missing runId, gameInstanceId, or moves');
   }
   const identity = currentIdentity(req.guestId);
-  const run = await requireAuthorizedRun(req.runId, identity);
+  assertValidMutatingIdentity(identity);
 
+  const run = await requireAuthorizedRun(req.runId, identity);
   if (run.status !== 'in_game' || !run.activeGame) {
     throw new HttpError(409, 'Run does not have an active game in progress');
   }
   const activeGame = run.activeGame;
+  if (req.gameInstanceId !== activeGame.gameInstanceId) {
+    throw new HttpError(
+      409,
+      'game instance is out of date; reload current run state',
+    );
+  }
   if (req.plyNumber !== activeGame.plyNumber) {
     throw new HttpError(
       409,
@@ -392,7 +443,8 @@ async function routeSubmitTurn(
     );
     const huntCount = await dbGetCommunityHuntCount(run.dayKey);
     return {
-      run: expiredRun,
+      serverNowMs: deps.now(),
+      run: toPublicRunState(expiredRun),
       lastPlayerMoves: [],
       lastBotMoves: [],
       stageOutcome: 'loss',
@@ -422,7 +474,7 @@ async function routeSubmitTurn(
   const { boss, playerColor } = activeGame.opponent;
 
   if (playerOutcome.terminalResult) {
-    const outcome = await handleStageTerminal(
+    return handleStageTerminal(
       run,
       activeGame,
       playerOutcome.terminalResult,
@@ -431,7 +483,6 @@ async function routeSubmitTurn(
       [],
       deps,
     );
-    return outcome;
   }
 
   const botPly = activeGame.plyNumber + 1;
@@ -479,7 +530,10 @@ async function routeSubmitTurn(
     run.openingRoll,
     deps.random,
   );
+  // Sample clock start AFTER bot calculation so bot compute never subtracts player time.
+  const turnStartedAtMs = deps.now();
   const updatedGame: ActiveGameSnapshot = {
+    gameInstanceId: activeGame.gameInstanceId,
     stage: activeGame.stage,
     opponent: activeGame.opponent,
     baseFen: botOutcome.nextFen,
@@ -488,21 +542,28 @@ async function routeSubmitTurn(
     currentRoll: nextPlayerRoll,
     playerRemainingMs: nextPlayerRemainingMs,
     botRemainingMs: activeGame.botRemainingMs,
-    turnStartedAtMs: nowMs,
+    turnStartedAtMs,
     lastBotMoves: botMoves,
     ...(botLine ? { botLine } : {}),
   };
 
-  const updatedRun: RunState = {
+  const updatedRun: StoredRunState = {
     ...run,
     activeGame: updatedGame,
-    updatedAtMs: nowMs,
+    updatedAtMs: turnStartedAtMs,
   };
-  await dbSaveRun(updatedRun);
+  const cas = await dbSaveRunCas(updatedRun, run.revision);
+  if (!cas.committed || !cas.run) {
+    throw new HttpError(
+      409,
+      'Turn conflicted with a concurrent update; reload current run state',
+    );
+  }
 
   const communityHuntCount = await dbGetCommunityHuntCount(run.dayKey);
   return {
-    run: updatedRun,
+    serverNowMs: deps.now(),
+    run: toPublicRunState(cas.run),
     lastPlayerMoves: req.moves,
     lastBotMoves: botMoves,
     ...(botLine ? { botLine } : {}),
@@ -512,7 +573,7 @@ async function routeSubmitTurn(
 }
 
 async function handleStageTerminal(
-  run: RunState,
+  run: StoredRunState,
   activeGame: ActiveGameSnapshot,
   terminalResult: GameTerminalResult,
   playerTurnCount: number,
@@ -524,103 +585,29 @@ async function handleStageTerminal(
   const { boss, playerColor } = activeGame.opponent;
 
   if (terminalResult.winner === playerColor) {
-    const entry: StageChronicleEntry = {
-      stage: activeGame.stage,
-      bossId: boss.id,
-      bossName: boss.name,
-      outcome: 'win',
-      turns: playerTurnCount,
+    return commitStageWin({
+      run,
+      activeGame,
       reason: terminalResult.reason,
-    };
-    const nextStage = activeGame.stage + 1;
-    const nextWins = run.wins + 1;
-    const nextTotalTurns = run.totalTurns + playerTurnCount;
-
-    let communityHuntCount = await dbGetCommunityHuntCount(run.dayKey);
-    if (activeGame.stage === 6) {
-      const hunt = await dbRecordCommunityHuntWin(
-        run.dayKey,
-        run.playerKey,
-        run.isGuest,
-      );
-      communityHuntCount = hunt.count;
-    }
-
-    const nextStageEpitaph = await dbGetStageEpitaph(run.dayKey, nextStage);
-    const botLine = pickCharacterLine(
-      boss.id,
-      'loss',
-      undefined,
-      deps.random,
-    ).text;
-
-    const progressedRun: RunState = {
-      ...run,
-      status: 'paused_between_games',
-      currentStage: nextStage,
-      wins: nextWins,
-      totalTurns: nextTotalTurns,
-      chronicle: [...run.chronicle, entry],
-      activeGame: null,
-      nextStageEpitaph,
-      updatedAtMs: nowMs,
-    };
-    const { dailyRank } = await dbRecordLeaderboardRun(progressedRun, nowMs);
-    const savedRun: RunState =
-      dailyRank !== null ? { ...progressedRun, dailyRank } : progressedRun;
-    await dbSaveRun(savedRun);
-
-    return {
-      run: savedRun,
+      playerTurnCount,
       lastPlayerMoves,
       lastBotMoves,
-      botLine,
-      stageOutcome: 'win',
-      outcomeReason: terminalResult.reason,
-      communityHuntCount,
-      communityHuntTarget: DEFAULT_HUNT_TARGET,
-    };
+      nowMs,
+      deps,
+    });
   }
 
   if (terminalResult.winner === null) {
-    const entry: StageChronicleEntry = {
-      stage: activeGame.stage,
-      bossId: boss.id,
-      bossName: boss.name,
-      outcome: 'draw',
-      turns: playerTurnCount,
+    return commitStageDraw({
+      run,
+      activeGame,
       reason: terminalResult.reason,
-    };
-    const nextStageEpitaph = await dbGetStageEpitaph(
-      run.dayKey,
-      activeGame.stage,
-    );
-    const botLine = pickCharacterLine(
-      boss.id,
-      'draw',
-      undefined,
-      deps.random,
-    ).text;
-    const drawnRun: RunState = {
-      ...run,
-      status: 'paused_between_games',
-      chronicle: [...run.chronicle, entry],
-      activeGame: null,
-      nextStageEpitaph,
-      updatedAtMs: nowMs,
-    };
-    await dbSaveRun(drawnRun);
-
-    return {
-      run: drawnRun,
+      playerTurnCount,
       lastPlayerMoves,
       lastBotMoves,
-      botLine,
-      stageOutcome: 'draw',
-      outcomeReason: terminalResult.reason,
-      communityHuntCount: await dbGetCommunityHuntCount(run.dayKey),
-      communityHuntTarget: DEFAULT_HUNT_TARGET,
-    };
+      nowMs,
+      deps,
+    });
   }
 
   const botLine = pickCharacterLine(
@@ -636,7 +623,8 @@ async function handleStageTerminal(
     deps,
   );
   return {
-    run: finishedRun,
+    serverNowMs: deps.now(),
+    run: toPublicRunState(finishedRun),
     lastPlayerMoves,
     lastBotMoves,
     botLine,
@@ -647,23 +635,173 @@ async function handleStageTerminal(
   };
 }
 
+async function commitStageWin(params: {
+  readonly run: StoredRunState;
+  readonly activeGame: ActiveGameSnapshot;
+  readonly reason: GameTerminalResult['reason'];
+  readonly playerTurnCount: number;
+  readonly lastPlayerMoves: readonly string[];
+  readonly lastBotMoves: readonly string[];
+  readonly nowMs: number;
+  readonly deps: ServerDeps;
+}): Promise<SubmitTurnRsp> {
+  const { run, activeGame, playerTurnCount, nowMs, deps } = params;
+  const { boss } = activeGame.opponent;
+  const entry: StageChronicleEntry = {
+    stage: activeGame.stage,
+    bossId: boss.id,
+    bossName: boss.name,
+    outcome: 'win',
+    turns: playerTurnCount,
+    reason: params.reason,
+  };
+  const nextStage = activeGame.stage + 1;
+  const progressedRun: StoredRunState = {
+    ...run,
+    status: 'paused_between_games',
+    currentStage: nextStage,
+    wins: run.wins + 1,
+    totalTurns: run.totalTurns + playerTurnCount,
+    chronicle: [...run.chronicle, entry],
+    activeGame: null,
+    updatedAtMs: nowMs,
+  };
+
+  const cas = await dbSaveRunCas(progressedRun, run.revision);
+  if (!cas.committed || !cas.run) {
+    throw new HttpError(
+      409,
+      'Turn conflicted with a concurrent update; reload current run state',
+    );
+  }
+
+  let communityHuntCount = await dbGetCommunityHuntCount(cas.run.dayKey);
+  if (activeGame.stage === 6) {
+    const hunt = await dbRecordCommunityHuntWin(
+      cas.run.dayKey,
+      cas.run.playerKey,
+      cas.run.isGuest,
+    );
+    communityHuntCount = hunt.count;
+  }
+
+  const [{ dailyRank }, nextStageEpitaph] = await Promise.all([
+    dbRecordLeaderboardRun(cas.run, nowMs),
+    dbGetStageEpitaph(cas.run.dayKey, nextStage),
+  ]);
+
+  const enrichedRun: StoredRunState = {
+    ...cas.run,
+    nextStageEpitaph,
+    ...(dailyRank !== null ? { dailyRank } : {}),
+  };
+  const metaCas = await dbSaveRunCas(enrichedRun, cas.run.revision);
+  if (!metaCas.committed && !metaCas.run) {
+    throw new HttpError(
+      409,
+      'Run state changed concurrently; reload current run state',
+    );
+  }
+  const finalRun = metaCas.run ?? enrichedRun;
+
+  const botLine = pickCharacterLine(
+    boss.id,
+    'loss',
+    undefined,
+    deps.random,
+  ).text;
+
+  return {
+    serverNowMs: deps.now(),
+    run: toPublicRunState(finalRun),
+    lastPlayerMoves: params.lastPlayerMoves,
+    lastBotMoves: params.lastBotMoves,
+    botLine,
+    stageOutcome: 'win',
+    outcomeReason: params.reason,
+    communityHuntCount,
+    communityHuntTarget: DEFAULT_HUNT_TARGET,
+  };
+}
+
+async function commitStageDraw(params: {
+  readonly run: StoredRunState;
+  readonly activeGame: ActiveGameSnapshot;
+  readonly reason: GameTerminalResult['reason'];
+  readonly playerTurnCount: number;
+  readonly lastPlayerMoves: readonly string[];
+  readonly lastBotMoves: readonly string[];
+  readonly nowMs: number;
+  readonly deps: ServerDeps;
+}): Promise<SubmitTurnRsp> {
+  const { run, activeGame, playerTurnCount, nowMs, deps } = params;
+  const { boss } = activeGame.opponent;
+  const entry: StageChronicleEntry = {
+    stage: activeGame.stage,
+    bossId: boss.id,
+    bossName: boss.name,
+    outcome: 'draw',
+    turns: playerTurnCount,
+    reason: params.reason,
+  };
+  const drawnRun: StoredRunState = {
+    ...run,
+    status: 'paused_between_games',
+    chronicle: [...run.chronicle, entry],
+    activeGame: null,
+    updatedAtMs: nowMs,
+  };
+  const cas = await dbSaveRunCas(drawnRun, run.revision);
+  if (!cas.committed || !cas.run) {
+    throw new HttpError(
+      409,
+      'Turn conflicted with a concurrent update; reload current run state',
+    );
+  }
+
+  const [nextStageEpitaph, huntCount] = await Promise.all([
+    dbGetStageEpitaph(cas.run.dayKey, activeGame.stage),
+    dbGetCommunityHuntCount(cas.run.dayKey),
+  ]);
+  const enrichedRun: StoredRunState = { ...cas.run, nextStageEpitaph };
+  const metaCas = await dbSaveRunCas(enrichedRun, cas.run.revision);
+  if (!metaCas.committed && !metaCas.run) {
+    throw new HttpError(
+      409,
+      'Run state changed concurrently; reload current run state',
+    );
+  }
+  const finalRun = metaCas.run ?? enrichedRun;
+
+  const botLine = pickCharacterLine(
+    boss.id,
+    'draw',
+    undefined,
+    deps.random,
+  ).text;
+
+  return {
+    serverNowMs: deps.now(),
+    run: toPublicRunState(finalRun),
+    lastPlayerMoves: params.lastPlayerMoves,
+    lastBotMoves: params.lastBotMoves,
+    botLine,
+    stageOutcome: 'draw',
+    outcomeReason: params.reason,
+    communityHuntCount: huntCount,
+    communityHuntTarget: DEFAULT_HUNT_TARGET,
+  };
+}
+
 async function finalizeLossRun(
-  run: RunState,
+  run: StoredRunState,
   playerTurnCount: number,
   reason: GameTerminalResult['reason'],
   deps: ServerDeps,
-): Promise<RunState> {
+): Promise<StoredRunState> {
   const nowMs = deps.now();
   const stage = run.activeGame?.stage ?? run.currentStage;
   const opponent = run.activeGame?.opponent ?? getStageOpponent(stage);
-
-  await dbRecordStageDeath(
-    run.dayKey,
-    stage,
-    opponent.boss.id,
-    run.username,
-    playerTurnCount,
-  );
 
   const entry: StageChronicleEntry = {
     stage,
@@ -674,7 +812,7 @@ async function finalizeLossRun(
     reason,
   };
   const updatedChronicle = [...run.chronicle, entry];
-  const candidateRun: RunState = {
+  const candidateRun: StoredRunState = {
     ...run,
     status: 'finished',
     chronicle: updatedChronicle,
@@ -683,17 +821,70 @@ async function finalizeLossRun(
     completedAtMs: nowMs,
   };
 
-  const { dailyRank } = await dbRecordLeaderboardRun(candidateRun, nowMs);
-  const effectiveRank =
-    dailyRank ?? (await dbGetDailyRank(run.dayKey, run.playerKey));
+  const cas = await dbSaveRunCas(candidateRun, run.revision);
+  if (!cas.committed || !cas.run) {
+    if (cas.run?.status === 'finished') {
+      return cas.run;
+    }
+    throw new HttpError(
+      409,
+      'Run state changed concurrently before finishing; reload run state',
+    );
+  }
+
+  // Only the winning CAS caller records stage death and updates leaderboards.
+  await dbRecordStageDeath(
+    cas.run.dayKey,
+    stage,
+    cas.run.username,
+    playerTurnCount,
+  );
+  return enrichAndSaveFinishedRun(cas.run, cas.run.completedAtMs ?? nowMs);
+}
+
+async function retirePausedRunWithoutDeath(
+  run: StoredRunState,
+  deps: ServerDeps,
+): Promise<StoredRunState> {
+  const nowMs = deps.now();
+  const candidateRun: StoredRunState = {
+    ...run,
+    status: 'finished',
+    activeGame: null,
+    updatedAtMs: nowMs,
+    completedAtMs: nowMs,
+  };
+
+  const cas = await dbSaveRunCas(candidateRun, run.revision);
+  if (!cas.committed || !cas.run) {
+    if (cas.run?.status === 'finished') {
+      return cas.run;
+    }
+    throw new HttpError(
+      409,
+      'Run state changed concurrently before resigning; reload run state',
+    );
+  }
+
+  return enrichAndSaveFinishedRun(cas.run, cas.run.completedAtMs ?? nowMs);
+}
+
+async function enrichAndSaveFinishedRun(
+  finishedBase: StoredRunState,
+  completedAtMs: number,
+): Promise<StoredRunState> {
+  const { dailyRank } = await dbRecordLeaderboardRun(
+    finishedBase,
+    completedAtMs,
+  );
   const shareCardText = formatSpoilerFreeShareCard({
-    dayKey: run.dayKey,
-    openingRoll: run.openingRoll,
-    firstTry: run.firstTry,
-    wins: run.wins,
-    totalTurns: run.totalTurns,
-    rank: effectiveRank,
-    stages: updatedChronicle.map((item) => ({
+    dayKey: finishedBase.dayKey,
+    openingRoll: finishedBase.openingRoll,
+    firstTry: finishedBase.firstTry,
+    wins: finishedBase.wins,
+    totalTurns: finishedBase.totalTurns,
+    rank: dailyRank,
+    stages: finishedBase.chronicle.map((item) => ({
       stage: item.stage,
       bossName: item.bossName,
       outcome: item.outcome,
@@ -701,19 +892,22 @@ async function finalizeLossRun(
     })),
   });
 
-  const finishedRun: RunState = {
-    ...candidateRun,
-    ...(effectiveRank !== null ? { dailyRank: effectiveRank } : {}),
+  const { dailyRank: _oldRank, ...rest } = finishedBase;
+  const enriched: StoredRunState = {
+    ...rest,
+    ...(dailyRank !== null ? { dailyRank } : {}),
     shareCardText,
   };
-  await dbSaveRun(finishedRun);
-  return finishedRun;
+  const cas = await dbSaveRunCas(enriched, finishedBase.revision, {
+    allowAlreadyFinished: true,
+  });
+  return cas.committed && cas.run ? cas.run : enriched;
 }
 
 async function syncClockExpiration(
-  run: RunState,
+  run: StoredRunState,
   deps: ServerDeps,
-): Promise<RunState> {
+): Promise<StoredRunState> {
   if (run.status !== 'in_game' || !run.activeGame) {
     return run;
   }
@@ -732,6 +926,8 @@ async function routePauseRun(
     throw new HttpError(400, 'Missing runId');
   }
   const identity = currentIdentity(req.guestId);
+  assertValidMutatingIdentity(identity);
+
   const run = await requireAuthorizedRun(req.runId, identity);
   if (run.status === 'in_game') {
     throw new HttpError(
@@ -739,12 +935,22 @@ async function routePauseRun(
       'Pause is only allowed between games, never during an active clock',
     );
   }
-  const updated: RunState = {
-    ...run,
-    updatedAtMs: deps.now(),
-  };
-  await dbSaveRun(updated);
-  return { run: updated };
+  if (run.status !== 'paused_between_games') {
+    throw new HttpError(409, 'Only paused between-game runs can be paused');
+  }
+  const currentRunId = await dbGetCurrentRunId(run.dayKey, identity.playerKey);
+  if (currentRunId !== run.runId) {
+    throw new HttpError(409, 'Cannot pause an older run that is not current');
+  }
+
+  const cas = await dbSaveRunCas(
+    { ...run, updatedAtMs: deps.now() },
+    run.revision,
+  );
+  if (!cas.committed || !cas.run) {
+    throw new HttpError(409, 'Run state changed concurrently; reload state');
+  }
+  return { run: toPublicRunState(cas.run) };
 }
 
 async function routeResignRun(
@@ -755,17 +961,23 @@ async function routeResignRun(
     throw new HttpError(400, 'Missing runId');
   }
   const identity = currentIdentity(req.guestId);
-  const run = await requireAuthorizedRun(req.runId, identity);
+  assertValidMutatingIdentity(identity);
+
+  const loaded = await requireAuthorizedRun(req.runId, identity);
+  const run = await syncClockExpiration(loaded, deps);
   if (run.status === 'finished') {
-    return { run };
+    return { run: toPublicRunState(run) };
   }
-  const finished = await finalizeLossRun(
-    run,
-    run.activeGame?.playerTurnCount ?? 0,
-    'resigned',
-    deps,
-  );
-  return { run: finished };
+  const finished =
+    run.status === 'paused_between_games'
+      ? await retirePausedRunWithoutDeath(run, deps)
+      : await finalizeLossRun(
+          run,
+          run.activeGame?.playerTurnCount ?? 0,
+          'resigned',
+          deps,
+        );
+  return { run: toPublicRunState(finished) };
 }
 
 async function routeShareComment(
@@ -775,6 +987,8 @@ async function routeShareComment(
     throw new HttpError(400, 'Missing runId');
   }
   const identity = currentIdentity(req.guestId);
+  assertValidMutatingIdentity(identity);
+
   const run = await requireAuthorizedRun(req.runId, identity);
   const shareText =
     run.shareCardText ??
@@ -811,13 +1025,11 @@ async function routeShareComment(
     });
     return { posted: true, shareText };
   } catch (err) {
+    console.error('Failed to submit share comment:', err);
     return {
       posted: false,
       shareText,
-      reason:
-        err instanceof Error
-          ? err.message
-          : 'Could not submit comment directly; copy and paste below.',
+      reason: 'Could not submit comment directly; copy and paste below.',
     };
   }
 }
@@ -858,10 +1070,19 @@ function currentIdentity(
   );
 }
 
+function assertValidMutatingIdentity(identity: PlayerIdentity): void {
+  if (!identity.isAuthenticated && !identity.hasValidGuestId) {
+    throw new HttpError(
+      400,
+      'valid user session or guest identity is required',
+    );
+  }
+}
+
 async function requireAuthorizedRun(
   runId: string,
   identity: PlayerIdentity,
-): Promise<RunState> {
+): Promise<StoredRunState> {
   const run = await dbGetRunById(runId);
   if (!run) {
     throw new HttpError(404, 'Run not found');
@@ -892,24 +1113,72 @@ async function routeAppInstall(deps: ServerDeps): Promise<TriggerResponse> {
 }
 
 async function readJson<T>(reqMsg: IncomingMessage): Promise<T> {
-  const chunks: Uint8Array[] = [];
-  reqMsg.on('data', (chunk: Uint8Array) => chunks.push(chunk));
-  await once(reqMsg, 'end');
-  const raw = Buffer.concat(chunks).toString('utf8');
+  const raw = await readRequestText(reqMsg, MAX_BODY_BYTES);
   if (!raw.trim()) {
     return {} as T;
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(raw) as T;
+    parsed = JSON.parse(raw);
   } catch {
     throw new HttpError(400, 'Invalid JSON payload');
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new HttpError(400, 'Request body must be a JSON object');
+  }
+  return parsed as T;
+}
+
+async function readRequestText(
+  reqMsg: IncomingMessage,
+  maxBytes: number,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    let settled = false;
+
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
+    reqMsg.on('data', (chunk: Uint8Array) => {
+      if (settled) return;
+      totalBytes += chunk.byteLength;
+      if (totalBytes > maxBytes) {
+        reqMsg.pause();
+        fail(new HttpError(413, 'Request payload too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    reqMsg.on('error', (err) => fail(err));
+    reqMsg.on('aborted', () => fail(new HttpError(400, 'Request aborted')));
+    reqMsg.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+  });
 }
 
 async function drainRequestBody(reqMsg: IncomingMessage): Promise<void> {
   if (reqMsg.readableEnded) return;
-  reqMsg.resume();
-  await once(reqMsg, 'end');
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
+    reqMsg.on('error', (err) => finish(err));
+    reqMsg.on('close', () => finish());
+    reqMsg.on('end', () => finish());
+    reqMsg.resume();
+  });
 }
 
 function writeJson(status: number, json: unknown, rsp: ServerResponse): void {

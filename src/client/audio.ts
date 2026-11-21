@@ -11,8 +11,10 @@ export type SoundCue =
 
 const MUTE_KEY = 'dicechess_daily_muted';
 let audioCtx: AudioContext | null = null;
+let sessionMuted: boolean | null = null;
 
 export function isSoundMuted(): boolean {
+  if (sessionMuted !== null) return sessionMuted;
   try {
     return window.localStorage.getItem(MUTE_KEY) === '1';
   } catch {
@@ -21,6 +23,7 @@ export function isSoundMuted(): boolean {
 }
 
 export function setSoundMuted(muted: boolean): void {
+  sessionMuted = muted;
   try {
     window.localStorage.setItem(MUTE_KEY, muted ? '1' : '0');
   } catch {
@@ -35,9 +38,7 @@ function ensureCtx(): AudioContext | null {
     (window as unknown as { webkitAudioContext?: typeof AudioContext })
       .webkitAudioContext;
   if (!Ctor) return null;
-  if (!audioCtx) {
-    audioCtx = new Ctor();
-  }
+  audioCtx ??= new Ctor();
   if (audioCtx.state === 'suspended') {
     void audioCtx.resume().catch(() => {});
   }

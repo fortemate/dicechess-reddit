@@ -4,6 +4,7 @@ import {
   type BossId,
   type DailyOpeningRoll,
 } from './daily.ts';
+import { cryptoRandomFloat } from './engine.ts';
 
 export type DialogueEvent =
   | 'intro'
@@ -242,7 +243,7 @@ export function pickCharacterLine(
   bossId: BossId,
   event: DialogueEvent,
   lastLineId?: string,
-  random: () => number = Math.random,
+  random: () => number = cryptoRandomFloat,
 ): DialogueLine {
   const pool = SCRIPTS[bossId][event];
   const entries: DialogueLine[] = pool.map((text, index) => ({
@@ -262,6 +263,12 @@ export function pickCharacterLine(
   return filtered[idx] ?? entries[0]!;
 }
 
+function formatStageOutcomeIcon(outcome: ShareCardStage['outcome']): string {
+  if (outcome === 'win') return '🟢';
+  if (outcome === 'draw') return '🟡';
+  return '💀';
+}
+
 /** Formats a spoiler-free share card ready to copy or post as a Reddit comment. */
 export function formatSpoilerFreeShareCard(input: ShareCardInput): string {
   const theme = getDailyThemeName(input.openingRoll);
@@ -270,11 +277,10 @@ export function formatSpoilerFreeShareCard(input: ShareCardInput): string {
     .join('');
   const firstTryTag = input.firstTry ? ' · ⭐ First Try' : '';
   const chronicle = input.stages
-    .map((entry) => {
-      const icon =
-        entry.outcome === 'win' ? '🟢' : entry.outcome === 'draw' ? '🟡' : '💀';
-      return `${icon} ${entry.bossName} (${entry.turns}t)`;
-    })
+    .map(
+      (entry) =>
+        `${formatStageOutcomeIcon(entry.outcome)} ${entry.bossName} (${entry.turns}t)`,
+    )
     .join(' → ');
   const rankPart = input.rank !== null ? ` · Rank #${input.rank} today` : '';
   const header = `🎲 Dice Chess Daily — ${input.dayKey} (${theme}: ${diceIcons})${firstTryTag}`;

@@ -32,6 +32,9 @@ describe('daily rules & gauntlet definitions', () => {
       year: '2027',
     });
 
+    const jan3End = Date.parse('2027-01-03T23:59:59.999Z');
+    assert.equal(utcWeekKey(jan3End), '2026-W53');
+
     const week1Start = Date.parse('2027-01-04T00:00:00.000Z');
     assert.equal(utcWeekKey(week1Start), '2027-W01');
   });

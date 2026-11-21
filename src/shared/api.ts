@@ -32,6 +32,7 @@ export type StageEpitaph = {
 };
 
 export type ActiveGameSnapshot = {
+  readonly gameInstanceId: string;
   readonly stage: number;
   readonly opponent: StageOpponent;
   readonly baseFen: string;
@@ -49,8 +50,8 @@ export type RunStatus = 'in_game' | 'paused_between_games' | 'finished';
 
 export type RunState = {
   readonly runId: string;
+  readonly revision: number;
   readonly dayKey: string;
-  readonly playerKey: string;
   readonly username: string;
   readonly isGuest: boolean;
   readonly attemptNumber: number;
@@ -71,9 +72,9 @@ export type RunState = {
 };
 
 export type LeaderboardEntry = {
-  readonly playerKey: string;
   readonly username: string;
   readonly isGuest: boolean;
+  readonly isViewer: boolean;
   readonly wins: number;
   readonly totalTurns: number;
   readonly firstTry: boolean;
@@ -94,6 +95,7 @@ export type LeaderboardsBundle = {
 };
 
 export type GetDailyStateRsp = {
+  readonly serverNowMs: number;
   readonly dayKey: string;
   readonly themeName: string;
   readonly openingRoll: DailyOpeningRoll;
@@ -110,8 +112,6 @@ export type GetDailyStateRsp = {
   readonly activeRun: RunState | null;
 };
 
-export type GetLeaderboardsRsp = LeaderboardsBundle;
-
 export type StartRunReq = {
   readonly guestId?: string;
   readonly guestNickname?: string;
@@ -119,6 +119,7 @@ export type StartRunReq = {
 };
 
 export type StartRunRsp = {
+  readonly serverNowMs: number;
   readonly run: RunState;
   readonly resumed: boolean;
 };
@@ -126,11 +127,13 @@ export type StartRunRsp = {
 export type SubmitTurnReq = {
   readonly guestId?: string;
   readonly runId: string;
+  readonly gameInstanceId: string;
   readonly plyNumber: number;
   readonly moves: readonly string[];
 };
 
 export type SubmitTurnRsp = {
+  readonly serverNowMs: number;
   readonly run: RunState;
   readonly lastPlayerMoves: readonly string[];
   readonly lastBotMoves: readonly string[];

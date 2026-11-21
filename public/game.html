@@ -12,10 +12,10 @@
       :root {
         --bg: #0f172a;
         --panel: #1e293b;
-        --panel-soft: rgba(15, 23, 42, 0.72);
+        --panel-soft: #0f172a;
         --border: #334155;
         --text: #f8fafc;
-        --muted: #94a3b8;
+        --muted: #cbd5e1;
         --accent: #f59e0b;
         --accent-ink: #0f172a;
         --green: #22c55e;
@@ -124,18 +124,18 @@
         font-weight: 700;
       }
       .ladder-step.cleared {
-        border-color: rgba(34, 197, 94, 0.55);
-        background: rgba(34, 197, 94, 0.14);
-        color: #86efac;
+        border-color: #22c55e;
+        background: #052e16;
+        color: #bbf7d0;
       }
       .ladder-step.active {
         border-color: var(--accent);
-        background: rgba(245, 158, 11, 0.16);
-        color: #fde68a;
+        background: #3b1d06;
+        color: #fef08a;
       }
       .micro-guide {
-        background: rgba(56, 189, 248, 0.12);
-        border: 1px solid rgba(56, 189, 248, 0.35);
+        background: #082f49;
+        border: 1px solid #38bdf8;
         border-radius: 10px;
         padding: 0.5rem 0.65rem;
         display: flex;
@@ -143,7 +143,7 @@
         align-items: center;
         gap: 0.5rem;
         font-size: 0.78rem;
-        color: #e0f2fe;
+        color: #f0f9ff;
       }
       .card {
         background: var(--panel);
@@ -205,8 +205,9 @@
         white-space: nowrap;
       }
       .clock-box.low {
+        background: #450a0a;
         border-color: var(--danger);
-        color: #fca5a5;
+        color: #fecaca;
       }
       .board-wrap {
         width: min(100%, 440px);
@@ -331,12 +332,14 @@
       }
       .die-slot.playable {
         border-color: var(--accent);
-        background: rgba(245, 158, 11, 0.14);
+        background: #3b1d06;
         color: #fef3c7;
       }
       .die-slot.spent {
-        opacity: 0.38;
         border-style: dashed;
+        border-color: #475569;
+        background: #1e293b;
+        color: #cbd5e1;
       }
       .die-slot svg {
         width: 20px;
@@ -373,20 +376,20 @@
         cursor: not-allowed;
       }
       .btn-danger {
-        border: 1px solid rgba(239, 68, 68, 0.55);
+        border: 1px solid #ef4444;
         border-radius: 10px;
         padding: 0.55rem 0.85rem;
         font-weight: 700;
-        background: rgba(239, 68, 68, 0.18);
-        color: #fecaca;
+        background: #450a0a;
+        color: #fee2e2;
       }
       .epitaph-box {
-        background: rgba(239, 68, 68, 0.1);
-        border: 1px solid rgba(239, 68, 68, 0.32);
+        background: #450a0a;
+        border: 1px solid #ef4444;
         border-radius: 10px;
         padding: 0.55rem 0.7rem;
         font-size: 0.82rem;
-        color: #fecaca;
+        color: #fee2e2;
       }
       .chronicle-box {
         background: #0f172a;
@@ -408,9 +411,9 @@
         border-radius: 999px;
         font-size: 0.74rem;
         font-weight: 700;
-        background: rgba(245, 158, 11, 0.16);
-        color: #fde68a;
-        border: 1px solid rgba(245, 158, 11, 0.35);
+        background: #3b1d06;
+        color: #fef08a;
+        border: 1px solid #f59e0b;
       }
       dialog {
         width: min(94vw, 460px);
@@ -456,7 +459,7 @@
       }
       .tab-btn[aria-selected='true'] {
         border-color: var(--accent);
-        background: rgba(245, 158, 11, 0.18);
+        background: #3b1d06;
         color: #fef3c7;
       }
       .table-scroll {
@@ -475,7 +478,7 @@
         text-align: left;
       }
       tr.me {
-        background: rgba(245, 158, 11, 0.14);
+        background: #3b1d06;
       }
       .promo-grid {
         display: grid;
@@ -525,30 +528,11 @@
           <div class="brand-sub" id="header-sub">Loading gauntlet…</div>
         </div>
         <div class="toolbar">
-          <button
-            class="icon-btn"
-            id="btn-sound"
-            type="button"
-            aria-label="Toggle sound"
-          >
-            🔊
+          <button class="icon-btn" id="btn-sound" type="button">
+            🔊 Sound
           </button>
-          <button
-            class="icon-btn"
-            id="btn-rules"
-            type="button"
-            aria-label="How to play"
-          >
-            ? Rules
-          </button>
-          <button
-            class="icon-btn"
-            id="btn-lb"
-            type="button"
-            aria-label="Leaderboards"
-          >
-            🏆 Ranks
-          </button>
+          <button class="icon-btn" id="btn-rules" type="button">? Rules</button>
+          <button class="icon-btn" id="btn-lb" type="button">🏆 Ranks</button>
         </div>
       </header>
 
@@ -616,12 +600,7 @@
               <span class="pill hidden" id="first-try-pill">⭐ First Try</span>
             </div>
             <div style="display: flex; align-items: center; gap: 0.45rem">
-              <button
-                class="icon-btn"
-                id="btn-resign"
-                type="button"
-                aria-label="Resign run"
-              >
+              <button class="icon-btn" id="btn-resign" type="button">
                 🏳️ Resign
               </button>
               <div class="clock-box" id="player-clock" aria-live="off">
@@ -647,7 +626,7 @@
           style="background: var(--panel-soft); text-align: center"
         >
           <div class="avatar-lg" id="next-boss-avatar"></div>
-          <h3 id="next-boss-name"></h3>
+          <h3 id="next-boss-name">Next Challenger</h3>
           <p
             id="next-boss-summary"
             style="color: var(--muted); font-size: 0.84rem"
@@ -795,12 +774,7 @@
           Year
         </button>
       </div>
-      <div
-        class="table-scroll"
-        role="region"
-        aria-label="Leaderboard table"
-        tabindex="0"
-      >
+      <section class="table-scroll" aria-label="Leaderboard table">
         <table>
           <thead>
             <tr>
@@ -812,7 +786,7 @@
           </thead>
           <tbody id="lb-body"></tbody>
         </table>
-      </div>
+      </section>
     </dialog>
 
     <!-- Promotion Dialog -->

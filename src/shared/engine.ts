@@ -49,6 +49,36 @@ export interface CompletedTurnOutcome {
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] as const;
 const MAX_GAME_PLIES = 5000;
 
+/** Returns a cryptographically uniform float in `[0, 1)`. */
+export function cryptoRandomFloat(): number {
+  const arr = new Uint32Array(1);
+  globalThis.crypto.getRandomValues(arr);
+  return (arr[0] ?? 0) / 0x100000000;
+}
+
+function parseFenRow(
+  row: string,
+  rank: number,
+  pieces: Map<string, string>,
+): void {
+  let fileIndex = 0;
+  for (const ch of row) {
+    if (ch >= '1' && ch <= '8') {
+      fileIndex += Number(ch);
+      continue;
+    }
+    const file = FILES[fileIndex];
+    if (!file) {
+      throw new Error(`Rank overflow in FEN row "${row}"`);
+    }
+    pieces.set(`${file}${rank}`, ch);
+    fileIndex += 1;
+  }
+  if (fileIndex !== 8) {
+    throw new Error(`Incomplete FEN row "${row}"`);
+  }
+}
+
 /** Parses a 6-field or 7-field FEN/DFEN into square piece codes and counters. */
 export function parseFenBoard(fenOrDfen: string): ParsedBoard {
   const fields = fenOrDfen.trim().split(/\s+/);
@@ -63,24 +93,7 @@ export function parseFenBoard(fenOrDfen: string): ParsedBoard {
 
   const pieces = new Map<string, string>();
   for (let r = 0; r < 8; r += 1) {
-    const rank = 8 - r;
-    const row = rows[r] ?? '';
-    let fileIndex = 0;
-    for (const ch of row) {
-      if (ch >= '1' && ch <= '8') {
-        fileIndex += Number(ch);
-      } else {
-        const file = FILES[fileIndex];
-        if (!file) {
-          throw new Error(`Rank overflow in FEN row "${row}"`);
-        }
-        pieces.set(`${file}${rank}`, ch);
-        fileIndex += 1;
-      }
-    }
-    if (fileIndex !== 8) {
-      throw new Error(`Incomplete FEN row "${row}"`);
-    }
+    parseFenRow(rows[r] ?? '', 8 - r, pieces);
   }
 
   return {
@@ -104,7 +117,7 @@ export function toSixFieldFen(fenOrDfen: string): string {
 
 /** Rolls 3 six-sided dice uniformly over P, N, B, R, Q, K. */
 export function rollThreeDice(
-  random: () => number = Math.random,
+  random: () => number = cryptoRandomFloat,
 ): DailyOpeningRoll {
   const pick = (): DiePiece => {
     const idx = Math.min(
@@ -124,7 +137,7 @@ export function rollThreeDice(
 export function rollForTurn(
   plyNumber: number,
   openingRoll: DailyOpeningRoll,
-  random: () => number = Math.random,
+  random: () => number = cryptoRandomFloat,
 ): DailyOpeningRoll {
   if (plyNumber <= 2) {
     return [openingRoll[0], openingRoll[1], openingRoll[2]];
@@ -228,6 +241,85 @@ export function getTurnView(
   };
 }
 
+function classifyMoveSideEffects(
+  beforeBoard: ParsedBoard,
+  fromSq: string,
+  toSq: string,
+  promo: string | undefined,
+  capturedPieces: string[],
+): { readonly hadPromotion: boolean; readonly hadCastle: boolean } {
+  const movingPiece = beforeBoard.pieces.get(fromSq);
+  const targetPiece = beforeBoard.pieces.get(toSq);
+  const isDiagonalPawnAdvance =
+    movingPiece?.toLowerCase() === 'p' && !fromSq.startsWith(toSq[0] ?? '');
+
+  if (targetPiece) {
+    capturedPieces.push(targetPiece);
+  } else if (isDiagonalPawnAdvance) {
+    capturedPieces.push(beforeBoard.activeColor === 'w' ? 'p' : 'P');
+  }
+
+  const fromCode = fromSq.codePointAt(0) ?? 0;
+  const toCode = toSq.codePointAt(0) ?? 0;
+  const hadCastle =
+    movingPiece?.toLowerCase() === 'k' && Math.abs(fromCode - toCode) === 2;
+
+  return {
+    hadPromotion: Boolean(promo),
+    hadCastle,
+  };
+}
+
+function applyTurnMoveSequence(
+  rolledDfen: string,
+  rootTree: MoveTree,
+  moves: readonly string[],
+): {
+  readonly currentDfen: string;
+  readonly capturedPieces: readonly string[];
+  readonly hadPromotion: boolean;
+  readonly hadCastle: boolean;
+} {
+  let node: MoveTree = rootTree;
+  let currentDfen = rolledDfen;
+  const capturedPieces: string[] = [];
+  let hadPromotion = false;
+  let hadCastle = false;
+
+  for (const move of moves) {
+    const child = Object.hasOwn(node, move) ? node[move] : undefined;
+    if (!child) {
+      throw new Error(`Illegal turn sequence move "${move}"`);
+    }
+    const beforeBoard = parseFenBoard(currentDfen);
+    const fromSq = move.slice(0, 2);
+    const toSq = move.slice(2, 4);
+    const promo = move.slice(4) || undefined;
+    const effects = classifyMoveSideEffects(
+      beforeBoard,
+      fromSq,
+      toSq,
+      promo,
+      capturedPieces,
+    );
+    hadPromotion ||= effects.hadPromotion;
+    hadCastle ||= effects.hadCastle;
+
+    const applied = DiceChess.applyMove(currentDfen, fromSq, toSq, promo);
+    if (!applied) {
+      throw new Error(`Engine rejected move "${move}" on ${currentDfen}`);
+    }
+    currentDfen = applied;
+    node = child;
+  }
+
+  if (Object.keys(node).length > 0) {
+    throw new Error('Incomplete turn: additional mandatory micro-moves remain');
+  }
+
+  return { currentDfen, capturedPieces, hadPromotion, hadCastle };
+}
+
 /**
  * Validates a complete turn (including forced pass with `[]`) and advances the board
  * to the next side's 6-field FEN via `DiceChess.endTurn`.
@@ -238,11 +330,14 @@ export function completeTurnAndAdvance(
   moves: readonly string[],
   plyNumber: number,
 ): CompletedTurnOutcome {
+  if (roll.length !== 3) {
+    throw new Error(`Expected 3 dice for a turn roll, got ${roll.length}`);
+  }
   const rolledDfen = buildRolledDfen(baseFen, roll);
   const rootTree = DiceChess.getLegalTurnTree(rolledDfen);
-  const rootKeys = Object.keys(rootTree);
 
   if (moves.length === 0) {
+    const rootKeys = Object.keys(rootTree);
     if (rootKeys.length > 0) {
       throw new Error(
         `Cannot pass turn when legal moves exist (${rootKeys[0]})`,
@@ -263,56 +358,8 @@ export function completeTurnAndAdvance(
     };
   }
 
-  let node: MoveTree = rootTree;
-  let currentDfen = rolledDfen;
-  const capturedPieces: string[] = [];
-  let hadPromotion = false;
-  let hadCastle = false;
-
-  for (const move of moves) {
-    const child = Object.hasOwn(node, move) ? node[move] : undefined;
-    if (!child) {
-      throw new Error(`Illegal turn sequence move "${move}"`);
-    }
-    const beforeBoard = parseFenBoard(currentDfen);
-    const fromSq = move.slice(0, 2);
-    const toSq = move.slice(2, 4);
-    const promo = move.slice(4) || undefined;
-    const movingPiece = beforeBoard.pieces.get(fromSq);
-    const targetPiece = beforeBoard.pieces.get(toSq);
-
-    if (targetPiece) {
-      capturedPieces.push(targetPiece);
-    } else if (
-      movingPiece?.toLowerCase() === 'p' &&
-      fromSq[0] !== toSq[0] &&
-      !targetPiece
-    ) {
-      capturedPieces.push(beforeBoard.activeColor === 'w' ? 'p' : 'P');
-    }
-    if (promo) {
-      hadPromotion = true;
-    }
-    if (
-      movingPiece?.toLowerCase() === 'k' &&
-      Math.abs(fromSq.charCodeAt(0) - toSq.charCodeAt(0)) === 2
-    ) {
-      hadCastle = true;
-    }
-
-    const applied = DiceChess.applyMove(currentDfen, fromSq, toSq, promo);
-    if (!applied) {
-      throw new Error(`Engine rejected move "${move}" on ${currentDfen}`);
-    }
-    currentDfen = applied;
-    node = child;
-  }
-
-  if (Object.keys(node).length > 0) {
-    throw new Error('Incomplete turn: additional mandatory micro-moves remain');
-  }
-
-  const boardFenAfterMoves = toSixFieldFen(currentDfen);
+  const sequence = applyTurnMoveSequence(rolledDfen, rootTree, moves);
+  const boardFenAfterMoves = toSixFieldFen(sequence.currentDfen);
   const immediateResult = detectAutomaticResult(
     boardFenAfterMoves,
     plyNumber,
@@ -324,15 +371,15 @@ export function completeTurnAndAdvance(
       boardFenAfterMoves,
       terminalResult: immediateResult,
       wasForcedPass: false,
-      capturedPieces,
-      hadPromotion,
-      hadCastle,
+      capturedPieces: sequence.capturedPieces,
+      hadPromotion: sequence.hadPromotion,
+      hadCastle: sequence.hadCastle,
     };
   }
 
-  const nextFen = DiceChess.endTurn(currentDfen);
+  const nextFen = DiceChess.endTurn(sequence.currentDfen);
   if (!nextFen) {
-    throw new Error(`Engine refused endTurn on ${currentDfen}`);
+    throw new Error(`Engine refused endTurn on ${sequence.currentDfen}`);
   }
   const canonicalNext = toSixFieldFen(nextFen);
   return {
@@ -340,9 +387,9 @@ export function completeTurnAndAdvance(
     boardFenAfterMoves,
     terminalResult: detectAutomaticResult(canonicalNext, plyNumber, true),
     wasForcedPass: false,
-    capturedPieces,
-    hadPromotion,
-    hadCastle,
+    capturedPieces: sequence.capturedPieces,
+    hadPromotion: sequence.hadPromotion,
+    hadCastle: sequence.hadCastle,
   };
 }
 
