@@ -133,6 +133,9 @@
         background: #3b1d06;
         color: #fef08a;
       }
+      .ladder-step.rival {
+        box-shadow: inset 0 -3px 0 #38bdf8;
+      }
       .micro-guide {
         background: #082f49;
         border: 1px solid #38bdf8;
@@ -415,6 +418,16 @@
         color: #fef08a;
         border: 1px solid #f59e0b;
       }
+      .pill-record {
+        background: #052e16;
+        color: #bbf7d0;
+        border-color: #22c55e;
+      }
+      .pill-rival {
+        background: #172554;
+        color: #dbeafe;
+        border-color: #60a5fa;
+      }
       dialog {
         width: min(94vw, 460px);
         max-block-size: 86dvh;
@@ -598,6 +611,7 @@
             <div style="display: flex; flex-wrap: wrap; gap: 0.4rem">
               <span class="pill" id="streak-pill">0 Wins · 0t</span>
               <span class="pill hidden" id="first-try-pill">⭐ First Try</span>
+              <span class="pill pill-rival hidden" id="rival-pill"></span>
             </div>
             <div style="display: flex; align-items: center; gap: 0.45rem">
               <button class="icon-btn" id="btn-resign" type="button">
@@ -620,6 +634,17 @@
         <div style="text-align: center; display: grid; gap: 0.35rem">
           <h2 id="between-title">Stage Cleared!</h2>
           <p id="between-streak" style="color: #fde68a; font-weight: 700"></p>
+          <span
+            id="between-best"
+            class="pill pill-record hidden"
+            style="justify-self: center"
+            >🏆 New Daily Personal Best!</span
+          >
+          <span
+            id="between-rival"
+            class="pill pill-rival hidden"
+            style="justify-self: center"
+          ></span>
         </div>
         <div
           class="card"
@@ -652,6 +677,12 @@
       <section id="view-finished" class="card hidden" aria-label="Run Complete">
         <div style="text-align: center; display: grid; gap: 0.3rem">
           <h2 id="finish-title">Gauntlet Complete</h2>
+          <span
+            id="finish-best"
+            class="pill pill-record hidden"
+            style="justify-self: center"
+            >🏆 New Daily Personal Best!</span
+          >
           <p id="finish-summary" style="color: #fde68a; font-weight: 800"></p>
           <p
             id="finish-hunt"

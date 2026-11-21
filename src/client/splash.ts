@@ -6,7 +6,9 @@ import {
 } from '../shared/api.ts';
 import {
   DIE_METADATA,
+  formatUtcResetCountdown,
   getStageOpponent,
+  msUntilNextUtcMidnight,
   type DailyOpeningRoll,
 } from '../shared/daily.ts';
 import { bossAvatarSvg, diePipSvg } from './avatars.ts';
@@ -18,7 +20,7 @@ async function initSplash(): Promise<void> {
   ) as HTMLButtonElement | null;
   if (startBtn) {
     startBtn.addEventListener('click', (ev) => {
-      void requestExpandedMode(ev, 'game');
+      void launchExpandedGame(ev);
     });
   }
 
@@ -32,6 +34,15 @@ async function initSplash(): Promise<void> {
     renderSplash(data);
   } catch (err) {
     console.warn('Unable to load daily preview state', err);
+  }
+}
+
+async function launchExpandedGame(ev: MouseEvent): Promise<void> {
+  try {
+    await requestExpandedMode(ev, 'game');
+  } catch {
+    // Allow standalone testing directly at /game.html outside the Reddit host runtime.
+    window.location.assign('/game.html');
   }
 }
 
@@ -52,13 +63,19 @@ function renderSplashHeader(data: GetDailyStateRsp): void {
     titleEl.textContent = data.themeName;
   }
   if (subtitleEl) {
-    subtitleEl.textContent = `Day ${data.dayKey} · Wins Streak · Capture the King`;
+    const rivalHint = data.rivalTarget
+      ? ` · Goal: #${data.rivalTarget.rank} ${data.rivalTarget.username} (${data.rivalTarget.wins}W)`
+      : '';
+    subtitleEl.textContent = `Day ${data.dayKey} · Wins Streak${rivalHint}`;
   }
   if (statusEl) {
     const modeLabel = data.isGuest
       ? 'Guest Mode'
       : `Playing as ${data.playerUsername}`;
-    statusEl.textContent = `${modeLabel} · Pause between matches · 00:00 UTC reset`;
+    const resetIn = formatUtcResetCountdown(
+      msUntilNextUtcMidnight(data.serverNowMs),
+    );
+    statusEl.textContent = `${modeLabel} · Pause between matches · Resets in ${resetIn}`;
   }
 }
 
@@ -82,6 +99,7 @@ function renderSplashCommunityHunt(data: GetDailyStateRsp): void {
   const avatarEl = document.getElementById('boss-avatar');
   const huntLabelEl = document.getElementById('hunt-label');
   const huntFillEl = document.getElementById('hunt-fill');
+  const huntBadgeEl = document.getElementById('hunt-badge');
 
   if (avatarEl) {
     avatarEl.innerHTML = bossAvatarSvg(data.dailyBoss.id);
@@ -100,6 +118,10 @@ function renderSplashCommunityHunt(data: GetDailyStateRsp): void {
       ),
     );
     huntFillEl.style.width = `${pct}%`;
+  }
+  if (huntBadgeEl) {
+    huntBadgeEl.classList.toggle('hidden', !data.communityHuntBadge);
+    huntBadgeEl.textContent = data.communityHuntBadge ?? '';
   }
 }
 

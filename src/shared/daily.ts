@@ -293,6 +293,60 @@ export function getStageOpponent(stage: number): StageOpponent {
   };
 }
 
+/** Tiered Community Hunt thresholds calibrated for both test subreddits and full traffic. */
+export const COMMUNITY_HUNT_TIERS = [5, 15, 30] as const;
+
+export interface CommunityHuntStatus {
+  readonly count: number;
+  readonly target: number;
+  readonly badgeLabel: string | null;
+}
+
+/** Resolves the progressive Community Hunt milestone target and celebration badge. */
+export function getCommunityHuntStatus(count: number): CommunityHuntStatus {
+  const safeCount = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  let badgeLabel: string | null = null;
+  if (safeCount >= COMMUNITY_HUNT_TIERS[2]) {
+    badgeLabel = '🥇 Dragon Vanquished!';
+  } else if (safeCount >= COMMUNITY_HUNT_TIERS[1]) {
+    badgeLabel = '🥈 Silver Dragon Slayers';
+  } else if (safeCount >= COMMUNITY_HUNT_TIERS[0]) {
+    badgeLabel = '🥉 Bronze Dragon Slayers';
+  }
+
+  let target: number = COMMUNITY_HUNT_TIERS[2];
+  if (safeCount < COMMUNITY_HUNT_TIERS[0]) {
+    target = COMMUNITY_HUNT_TIERS[0];
+  } else if (safeCount < COMMUNITY_HUNT_TIERS[1]) {
+    target = COMMUNITY_HUNT_TIERS[1];
+  }
+  return { count: safeCount, target, badgeLabel };
+}
+
+/** Returns milliseconds remaining until the next 00:00 UTC daily reset. */
+export function msUntilNextUtcMidnight(nowMs: number = Date.now()): number {
+  const d = new Date(nowMs);
+  const nextMidnight = Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate() + 1,
+    0,
+    0,
+    0,
+    0,
+  );
+  return Math.max(0, nextMidnight - nowMs);
+}
+
+/** Formats milliseconds until 00:00 UTC reset as compact `Xh Ym` or `<1m`. */
+export function formatUtcResetCountdown(msRemaining: number): string {
+  const totalMinutes = Math.max(0, Math.floor(msRemaining / 60_000));
+  if (totalMinutes < 1) return '<1m';
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  return `${hours}h ${String(mins).padStart(2, '0')}m`;
+}
+
 /**
  * Leaderboard ordering:
  * 1. More Wins

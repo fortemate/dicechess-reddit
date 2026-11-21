@@ -7,7 +7,8 @@ export type SoundCue =
   | 'empty_roll'
   | 'game_win'
   | 'game_loss'
-  | 'game_draw';
+  | 'game_draw'
+  | 'new_record';
 
 const MUTE_KEY = 'dicechess_daily_muted';
 let audioCtx: AudioContext | null = null;
@@ -116,6 +117,12 @@ export function playSoundCue(cue: SoundCue): void {
       case 'game_draw':
         tone(ctx, 440, 440, 0.14, 0, 'sine', 0.07);
         tone(ctx, 493.88, 493.88, 0.18, 0.14, 'sine', 0.07);
+        break;
+      case 'new_record':
+        tone(ctx, 523.25, 523.25, 0.09, 0, 'triangle', 0.09);
+        tone(ctx, 659.25, 659.25, 0.09, 0.08, 'triangle', 0.09);
+        tone(ctx, 783.99, 783.99, 0.09, 0.16, 'triangle', 0.09);
+        tone(ctx, 1046.5, 1174.66, 0.24, 0.24, 'triangle', 0.1);
         break;
     }
   } catch {

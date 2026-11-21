@@ -46,6 +46,15 @@ export type ActiveGameSnapshot = {
   readonly botLine?: string;
 };
 
+export type RivalTarget = {
+  readonly rank: number;
+  readonly username: string;
+  readonly wins: number;
+  readonly totalTurns: number;
+  readonly firstTry: boolean;
+  readonly targetStage: number;
+};
+
 export type RunStatus = 'in_game' | 'paused_between_games' | 'finished';
 
 export type RunState = {
@@ -64,6 +73,8 @@ export type RunState = {
   readonly chronicle: readonly StageChronicleEntry[];
   readonly activeGame: ActiveGameSnapshot | null;
   readonly nextStageEpitaph?: StageEpitaph;
+  readonly rivalTarget?: RivalTarget | null;
+  readonly isNewDailyBest?: boolean;
   readonly dailyRank?: number;
   readonly shareCardText?: string;
   readonly startedAtMs: number;
@@ -104,6 +115,8 @@ export type GetDailyStateRsp = {
   readonly incrementMs: number;
   readonly communityHuntCount: number;
   readonly communityHuntTarget: number;
+  readonly communityHuntBadge?: string | null;
+  readonly rivalTarget?: RivalTarget | null;
   readonly topLeaders: readonly LeaderboardEntry[];
   readonly stageEpitaphs: readonly StageEpitaph[];
   readonly playerUsername: string;
@@ -142,6 +155,7 @@ export type SubmitTurnRsp = {
   readonly outcomeReason?: GameTerminalResult['reason'];
   readonly communityHuntCount: number;
   readonly communityHuntTarget: number;
+  readonly communityHuntBadge?: string | null;
 };
 
 export type PauseRunReq = {

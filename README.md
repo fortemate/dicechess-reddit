@@ -41,9 +41,13 @@ backed exclusively by Devvit Redis with zero external HTTP calls.
     `⭐ First Try`, (3) earlier completion timestamp.
   - **Day / Week / Month / Year** leaderboards aligned to `00:00 UTC`.
 - **Reddit Community Features**:
-  - **Live Feed Preview (`splash.html`)**: Shows today's `P + 2` roll, Ashby
-    Community Hunt progress bar, Top 3 daily streaks, and context-aware
+  - **Live Feed Preview (`splash.html`)**: Shows today's `P + 2` roll, tiered
+    Ashby Community Hunt progress (`5 / 15 / 30` players) with celebration
+    badges, Top 3 daily streaks, UTC reset countdown, and context-aware
     Start/Resume button.
+  - **Asynchronous Rivalry & Personal Bests**: Tracks your nearest daily rival
+    above you on the leaderboard (`🎯 Beat #k`), marks their target stage on the
+    ladder strip, and celebrates new daily personal records (`🏆`).
   - **Stage Epitaphs**: Displays the percentage of daily runs eliminated on the
     upcoming boss and the last fallen hero.
   - **1-Click Spoiler-Free Comment Card**: Copy or post a compact chronicle
@@ -55,7 +59,8 @@ backed exclusively by Devvit Redis with zero external HTTP calls.
   `dialogue.ts`, `api.ts`)
 - `src/server/` — Devvit Web CJS server (`server.ts`, `db.ts`) persisting runs,
   clocks, epitaphs, community hunt, and Day/Week/Month/Year leaderboards in
-  `@devvit/web/server` Redis
+  `@devvit/web/server` Redis, plus standalone local dev server (`local-dev.ts`,
+  `redis-mock.ts`)
 - `src/client/` & `public/` — Mobile-first Custom Post Preview (`splash.html`,
   `splash.ts`) and interactive board & gauntlet views (`game.html`, `game.ts`,
   `avatars.ts`, `audio.ts`, `guest.ts`)
@@ -71,6 +76,13 @@ mise install
 mise exec -- npm ci
 mise exec -- lefthook install
 mise exec -- npm run check
+```
+
+To run the splash and full gauntlet locally without authenticating with Reddit
+(`http://127.0.0.1:4173/splash.html` and `http://127.0.0.1:4173/game.html`):
+
+```bash
+mise exec -- npm run dev:local
 ```
 
 ## License

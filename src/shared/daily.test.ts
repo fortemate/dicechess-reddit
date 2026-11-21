@@ -3,10 +3,14 @@ import { describe, it } from 'node:test';
 import { DiceChess } from '@fortemate/dicechess-engine/rules';
 import {
   allPeriodKeys,
+  COMMUNITY_HUNT_TIERS,
   compareRuns,
+  formatUtcResetCountdown,
+  getCommunityHuntStatus,
   getDailyOpeningRoll,
   getDailyThemeName,
   getStageOpponent,
+  msUntilNextUtcMidnight,
   STANDARD_START_FEN,
   utcDayKey,
   utcMonthKey,
@@ -109,5 +113,35 @@ describe('daily rules & gauntlet definitions', () => {
       { wins: 5, totalTurns: 70, firstTry: false, completedAtMs: 2000 },
       { wins: 4, totalTurns: 50, firstTry: false, completedAtMs: 1000 },
     ]);
+  });
+
+  it('computes progressive Community Hunt tiers and UTC midnight countdowns', () => {
+    assert.deepEqual(COMMUNITY_HUNT_TIERS, [5, 15, 30]);
+    assert.deepEqual(getCommunityHuntStatus(0), {
+      count: 0,
+      target: 5,
+      badgeLabel: null,
+    });
+    assert.deepEqual(getCommunityHuntStatus(5), {
+      count: 5,
+      target: 15,
+      badgeLabel: '🥉 Bronze Dragon Slayers',
+    });
+    assert.deepEqual(getCommunityHuntStatus(15), {
+      count: 15,
+      target: 30,
+      badgeLabel: '🥈 Silver Dragon Slayers',
+    });
+    assert.deepEqual(getCommunityHuntStatus(30), {
+      count: 30,
+      target: 30,
+      badgeLabel: '🥇 Dragon Vanquished!',
+    });
+
+    const at2130 = Date.parse('2026-11-21T21:30:00.000Z');
+    const remaining = msUntilNextUtcMidnight(at2130);
+    assert.equal(remaining, 2 * 3_600_000 + 30 * 60_000);
+    assert.equal(formatUtcResetCountdown(remaining), '2h 30m');
+    assert.equal(formatUtcResetCountdown(30_000), '<1m');
   });
 });

@@ -26,6 +26,7 @@ import {
 } from '../shared/daily.ts';
 import { chooseBotTurn } from '../shared/engine.ts';
 import { dbSaveRun, type StoredRunState } from './db.ts';
+import { installRedisMock, type RedisMockController } from './redis-mock.ts';
 import { createAppHandler } from './server.ts';
 
 let server: Server;
@@ -36,65 +37,8 @@ let mockUser: { userId?: string; username?: string } = {
   username: 'alice_chess',
 };
 const postedComments: Array<{ id: string; text: string }> = [];
-
-const redisStore = new Map<string, string>();
-const hashStore = new Map<string, Map<string, string>>();
-const keyVersions = new Map<string, number>();
-
-const originalGet = redis.get.bind(redis);
-const originalSet = redis.set.bind(redis);
-const originalIncrBy = redis.incrBy.bind(redis);
-const originalHSet = redis.hSet.bind(redis);
-const originalHIncrBy = redis.hIncrBy.bind(redis);
-const originalHGetAll = redis.hGetAll.bind(redis);
-const originalHLen = redis.hLen.bind(redis);
-const originalWatch = redis.watch.bind(redis);
+let redisMock: RedisMockController;
 const originalSubmitComment = reddit.submitComment.bind(reddit);
-
-function bumpKeyVersion(key: string): void {
-  keyVersions.set(key, (keyVersions.get(key) ?? 0) + 1);
-}
-
-function syncSet(key: string, value: string): string {
-  redisStore.set(key, value);
-  bumpKeyVersion(key);
-  return 'OK';
-}
-
-function syncIncrBy(key: string, amount: number): number {
-  const next = Number(redisStore.get(key) ?? '0') + amount;
-  redisStore.set(key, `${next}`);
-  bumpKeyVersion(key);
-  return next;
-}
-
-function syncHSet(key: string, fieldValues: Record<string, string>): number {
-  const map = getHashMap(key);
-  let added = 0;
-  for (const [field, value] of Object.entries(fieldValues)) {
-    if (!map.has(field)) added += 1;
-    map.set(field, value);
-  }
-  bumpKeyVersion(key);
-  return added;
-}
-
-function syncHIncrBy(key: string, field: string, amount: number): number {
-  const map = getHashMap(key);
-  const next = Number(map.get(field) ?? '0') + amount;
-  map.set(field, `${next}`);
-  bumpKeyVersion(key);
-  return next;
-}
-
-function getHashMap(key: string): Map<string, string> {
-  let map = hashStore.get(key);
-  if (!map) {
-    map = new Map<string, string>();
-    hashStore.set(key, map);
-  }
-  return map;
-}
 
 async function postJson<T>(
   endpoint: string,
@@ -114,95 +58,11 @@ async function postJson<T>(
 
 describe('Devvit Web server endpoints & full gauntlet lifecycle', () => {
   before(async () => {
-    redis.get = async (key) => {
-      await Promise.resolve();
-      return redisStore.get(key);
-    };
-    redis.set = async (key, value) => syncSet(key, value);
-    redis.incrBy = async (key, amount) => syncIncrBy(key, amount);
-    redis.hSet = async (key, fieldValues) => syncHSet(key, fieldValues);
-    redis.hIncrBy = async (key, field, amount) =>
-      syncHIncrBy(key, field, amount);
-    redis.hGetAll = async (key) => {
-      const map = hashStore.get(key);
-      return map ? Object.fromEntries(map.entries()) : {};
-    };
-    redis.hLen = async (key) => {
-      return hashStore.get(key)?.size ?? 0;
-    };
-    redis.watch = (async (...keys: string[]) => {
-      const watched = new Map<string, number>();
-      for (const key of keys) {
-        watched.set(key, keyVersions.get(key) ?? 0);
-      }
-      let multiStarted = false;
-      const queued: Array<() => unknown> = [];
+    redisMock = installRedisMock({ yieldOnGet: true });
 
-      const tx = {
-        async multi() {
-          multiStarted = true;
-        },
-        async set(key: string, value: string) {
-          queued.push(() => syncSet(key, value));
-          return tx;
-        },
-        async incrBy(key: string, amount: number) {
-          queued.push(() => syncIncrBy(key, amount));
-          return tx;
-        },
-        async hSet(key: string, fieldValues: Record<string, string>) {
-          queued.push(() => syncHSet(key, fieldValues));
-          return tx;
-        },
-        async hIncrBy(key: string, field: string, amount: number) {
-          queued.push(() => syncHIncrBy(key, field, amount));
-          return tx;
-        },
-        async del(...delKeys: string[]) {
-          queued.push(() => {
-            for (const dk of delKeys) {
-              redisStore.delete(dk);
-              hashStore.delete(dk);
-              bumpKeyVersion(dk);
-            }
-            return delKeys.length;
-          });
-          return tx;
-        },
-        async unwatch() {
-          watched.clear();
-          queued.length = 0;
-          return tx;
-        },
-        async discard() {
-          multiStarted = false;
-          watched.clear();
-          queued.length = 0;
-        },
-        async watch(...moreKeys: string[]) {
-          for (const key of moreKeys) {
-            watched.set(key, keyVersions.get(key) ?? 0);
-          }
-          return tx;
-        },
-        async exec() {
-          if (!multiStarted) {
-            throw new Error('Must call multi() before exec()');
-          }
-          for (const [key, version] of watched.entries()) {
-            if ((keyVersions.get(key) ?? 0) !== version) {
-              return [];
-            }
-          }
-          return queued.map((op) => op());
-        },
-      };
-      return tx as unknown as Awaited<ReturnType<typeof redis.watch>>;
-    }) as typeof redis.watch;
-
-    reddit.submitComment = (async (opts: { id: string; text: string }) => {
+    reddit.submitComment = ((opts: { id: string; text: string }) => {
       postedComments.push({ id: opts.id, text: opts.text });
-      return {} as never;
+      return Promise.resolve({} as never);
     }) as typeof reddit.submitComment;
 
     const handler = createAppHandler({
@@ -230,14 +90,7 @@ describe('Devvit Web server endpoints & full gauntlet lifecycle', () => {
   });
 
   after(async () => {
-    redis.get = originalGet;
-    redis.set = originalSet;
-    redis.incrBy = originalIncrBy;
-    redis.hSet = originalHSet;
-    redis.hIncrBy = originalHIncrBy;
-    redis.hGetAll = originalHGetAll;
-    redis.hLen = originalHLen;
-    redis.watch = originalWatch;
+    redisMock.restore();
     reddit.submitComment = originalSubmitComment;
     if (!server.listening) return;
     await new Promise<void>((resolve, reject) => {
@@ -246,9 +99,7 @@ describe('Devvit Web server endpoints & full gauntlet lifecycle', () => {
   });
 
   beforeEach(() => {
-    redisStore.clear();
-    hashStore.clear();
-    keyVersions.clear();
+    redisMock.clear();
     postedComments.length = 0;
     mockNowMs = Date.parse('2026-11-21T12:00:00.000Z');
     mockUser = { userId: 't2_alice', username: 'alice_chess' };
@@ -416,9 +267,12 @@ describe('Devvit Web server endpoints & full gauntlet lifecycle', () => {
     assert.equal(winRsp.status, 200);
     assert.equal(winRsp.data.stageOutcome, 'win');
     assert.equal(winRsp.data.run.wins, 6);
+    assert.equal(winRsp.data.run.isNewDailyBest, true);
     assert.equal(winRsp.data.run.currentStage, 7);
     assert.equal(winRsp.data.run.status, 'paused_between_games');
     assert.equal(winRsp.data.communityHuntCount, 1);
+    assert.equal(winRsp.data.communityHuntTarget, 5);
+    assert.equal(winRsp.data.communityHuntBadge, null);
 
     // Pause between games succeeds when paused_between_games.
     const pauseRsp = await postJson<PauseRunRsp>(Endpoint.PauseRun, {
@@ -500,6 +354,84 @@ describe('Devvit Web server endpoints & full gauntlet lifecycle', () => {
       attempt2Resign.data.run.shareCardText ?? '',
       /Rank #1 today/,
     );
+  });
+
+  it('tracks asynchronous rival targets and unlocks tiered Community Hunt badges', async () => {
+    const today = utcDayKey(mockNowMs);
+    await redis.hSet(`hunt:${today}:members`, {
+      u1: '1',
+      u2: '1',
+      u3: '1',
+      u4: '1',
+      u5: '1',
+    });
+
+    // Alice completes a 1-win run and claims Rank #1.
+    const aliceStart = await postJson<StartRunRsp>(Endpoint.StartRun, {});
+    const aliceWinBoard: StoredRunState = {
+      ...aliceStart.data.run,
+      playerKey: 'user:t2_alice',
+      activeGame: {
+        ...aliceStart.data.run.activeGame!,
+        baseFen: '4k3/8/8/8/4Q3/8/8/4K3 w - - 0 1',
+        plyNumber: 1,
+        currentRoll: ['Q', 'P', 'P'] as const,
+        turnStartedAtMs: mockNowMs,
+      },
+    };
+    await dbSaveRun(aliceWinBoard);
+    const aliceWin = await postJson<SubmitTurnRsp>(Endpoint.SubmitTurn, {
+      runId: aliceStart.data.run.runId,
+      gameInstanceId: aliceStart.data.run.activeGame!.gameInstanceId,
+      plyNumber: 1,
+      moves: ['e4e8'],
+    });
+    assert.equal(aliceWin.data.communityHuntTarget, 15);
+    assert.equal(aliceWin.data.communityHuntBadge, '🥉 Bronze Dragon Slayers');
+    assert.equal(aliceWin.data.run.rivalTarget, null);
+
+    // Bob enters the gauntlet and sees Alice as his rival target at Stage 2.
+    mockUser = { userId: 't2_bob', username: 'bob_rook' };
+    const bobDaily = (await (
+      await fetch(`${serverURL}/${Endpoint.GetDailyState}`)
+    ).json()) as GetDailyStateRsp;
+    assert.equal(bobDaily.communityHuntCount, 5);
+    assert.equal(bobDaily.communityHuntTarget, 15);
+    assert.equal(bobDaily.communityHuntBadge, '🥉 Bronze Dragon Slayers');
+    assert.equal(bobDaily.rivalTarget?.username, 'alice_chess');
+    assert.equal(bobDaily.rivalTarget?.wins, 1);
+    assert.equal(bobDaily.rivalTarget?.targetStage, 2);
+
+    const bobStart = await postJson<StartRunRsp>(Endpoint.StartRun, {});
+    assert.equal(bobStart.data.run.rivalTarget?.username, 'alice_chess');
+
+    // Bob wins Stage 1 and Stage 2 (2 wins > Alice's 1 win) -> overtakes Alice!
+    const bobStage2WinBoard: StoredRunState = {
+      ...bobStart.data.run,
+      playerKey: 'user:t2_bob',
+      wins: 1,
+      totalTurns: 1,
+      currentStage: 2,
+      activeGame: {
+        ...bobStart.data.run.activeGame!,
+        stage: 2,
+        opponent: getStageOpponent(2),
+        baseFen: '4k3/8/8/8/4q3/8/8/4K3 b - - 0 1',
+        plyNumber: 2,
+        currentRoll: ['Q', 'P', 'P'] as const,
+        turnStartedAtMs: mockNowMs,
+      },
+    };
+    await dbSaveRun(bobStage2WinBoard);
+    const bobWin = await postJson<SubmitTurnRsp>(Endpoint.SubmitTurn, {
+      runId: bobStart.data.run.runId,
+      gameInstanceId: bobStart.data.run.activeGame!.gameInstanceId,
+      plyNumber: 2,
+      moves: ['e4e1'],
+    });
+    assert.equal(bobWin.data.run.wins, 2);
+    assert.equal(bobWin.data.run.isNewDailyBest, true);
+    assert.equal(bobWin.data.run.rivalTarget, null);
   });
 
   it('requires valid Reddit or guest identity on mutating endpoints', async () => {
