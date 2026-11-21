@@ -881,25 +881,25 @@ function playOutcomeAudioAndSetLabel(
 
 function renderBetweenGames(run: RunState): void {
   const opp = getStageOpponent(run.currentStage);
+  document.getElementById('pause-note')?.classList.add('hidden');
+  renderBetweenBanner(run);
+  renderBetweenNextOpponent(run, opp);
+}
+
+function renderBetweenBanner(run: RunState): void {
   const titleEl = document.getElementById('between-title');
   const streakEl = document.getElementById('between-streak');
   const bestEl = document.getElementById('between-best');
   const rivalEl = document.getElementById('between-rival');
-  const avatarEl = document.getElementById('next-boss-avatar');
-  const nameEl = document.getElementById('next-boss-name');
-  const summaryEl = document.getElementById('next-boss-summary');
-  const epitaphEl = document.getElementById('next-boss-epitaph');
-  const nextBtn = document.getElementById('btn-next-stage');
-  const pauseNote = document.getElementById('pause-note');
 
-  pauseNote?.classList.add('hidden');
   if (titleEl) {
     titleEl.textContent =
       lastOutcomeText || `Ready for Stage ${run.currentStage}`;
   }
   if (streakEl) {
     const star = run.firstTry ? ' · ⭐ First Try' : '';
-    streakEl.textContent = `Current Streak: ${run.wins} ${run.wins === 1 ? 'Win' : 'Wins'} (${run.totalTurns} turns)${star}`;
+    const winUnit = run.wins === 1 ? 'Win' : 'Wins';
+    streakEl.textContent = `Current Streak: ${run.wins} ${winUnit} (${run.totalTurns} turns)${star}`;
   }
   bestEl?.classList.toggle('hidden', !run.isNewDailyBest);
   if (rivalEl) {
@@ -908,6 +908,18 @@ function renderBetweenGames(run: RunState): void {
       ? `Target (Stage ${run.rivalTarget.targetStage}): ${formatRivalLabel(run.rivalTarget)}`
       : '';
   }
+}
+
+function renderBetweenNextOpponent(
+  run: RunState,
+  opp: ReturnType<typeof getStageOpponent>,
+): void {
+  const avatarEl = document.getElementById('next-boss-avatar');
+  const nameEl = document.getElementById('next-boss-name');
+  const summaryEl = document.getElementById('next-boss-summary');
+  const epitaphEl = document.getElementById('next-boss-epitaph');
+  const nextBtn = document.getElementById('btn-next-stage');
+
   if (avatarEl) avatarEl.innerHTML = bossAvatarSvg(opp.boss.id);
   if (nameEl) {
     const sideLabel =
