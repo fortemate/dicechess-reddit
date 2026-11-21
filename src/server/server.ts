@@ -1138,7 +1138,7 @@ async function readRequestText(
     let totalBytes = 0;
     let settled = false;
 
-    const fail = (err: unknown) => {
+    const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       reject(err);
@@ -1154,7 +1154,9 @@ async function readRequestText(
       }
       chunks.push(chunk);
     });
-    reqMsg.on('error', (err) => fail(err));
+    reqMsg.on('error', (err) =>
+      fail(err instanceof Error ? err : new Error(String(err))),
+    );
     reqMsg.on('aborted', () => fail(new HttpError(400, 'Request aborted')));
     reqMsg.on('end', () => {
       if (settled) return;
@@ -1168,13 +1170,15 @@ async function drainRequestBody(reqMsg: IncomingMessage): Promise<void> {
   if (reqMsg.readableEnded) return;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    const finish = (err?: unknown) => {
+    const finish = (err?: Error) => {
       if (settled) return;
       settled = true;
       if (err) reject(err);
       else resolve();
     };
-    reqMsg.on('error', (err) => finish(err));
+    reqMsg.on('error', (err) =>
+      finish(err instanceof Error ? err : new Error(String(err))),
+    );
     reqMsg.on('close', () => finish());
     reqMsg.on('end', () => finish());
     reqMsg.resume();

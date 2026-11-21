@@ -82,7 +82,7 @@ function sanitizeDisplayName(raw: string | undefined): string {
 }
 
 /** Returns the count of distinct authenticated players who beat Stage 6 today. */
-export async function dbGetCommunityHuntCount(dayKey: string): Promise<number> {
+export function dbGetCommunityHuntCount(dayKey: string): Promise<number> {
   return redis.hLen(communityHuntKey(dayKey));
 }
 
@@ -201,11 +201,7 @@ export type ClaimRunResult =
   | { readonly kind: 'existing'; readonly run: StoredRunState }
   | { readonly kind: 'created'; readonly run: StoredRunState };
 
-/**
- * Atomically resumes an existing non-finished run (when `!forceNew`) or claims the
- * next daily attempt number and stores a newly launched run in a single transaction.
- */
-export async function dbClaimOrCreateRun(params: {
+export interface ClaimOrCreateRunParams {
   readonly dayKey: string;
   readonly playerKey: string;
   readonly forceNew: boolean;
@@ -214,62 +210,91 @@ export async function dbClaimOrCreateRun(params: {
     firstTry: boolean,
   ) => StoredRunState;
   readonly onRetireExistingRun?: (existingRun: StoredRunState) => Promise<void>;
-}): Promise<ClaimRunResult> {
+}
+
+/**
+ * Atomically resumes an existing non-finished run (when `!forceNew`) or claims the
+ * next daily attempt number and stores a newly launched run in a single transaction.
+ */
+export async function dbClaimOrCreateRun(
+  params: ClaimOrCreateRunParams,
+): Promise<ClaimRunResult> {
+  return claimOrCreateRunWithRetry(params, TX_MAX_RETRIES);
+}
+
+async function claimOrCreateRunWithRetry(
+  params: ClaimOrCreateRunParams,
+  remainingAttempts: number,
+): Promise<ClaimRunResult> {
+  if (remainingAttempts <= 0) {
+    throw new Error(
+      'Could not claim daily gauntlet run due to high contention',
+    );
+  }
+  const outcome = await tryClaimOrCreateRunOnce(params);
+  if (outcome !== null) {
+    return outcome;
+  }
+  return claimOrCreateRunWithRetry(params, remainingAttempts - 1);
+}
+
+async function tryClaimOrCreateRunOnce(
+  params: ClaimOrCreateRunParams,
+): Promise<ClaimRunResult | null> {
   const pointerKey = currentRunPointerKey(params.dayKey, params.playerKey);
   const attKey = attemptsKey(params.dayKey, params.playerKey);
+  const txn = await redis.watch(pointerKey, attKey);
+  const [existingRunId, attRaw] = await Promise.all([
+    redis.get(pointerKey),
+    redis.get(attKey),
+  ]);
+  const existing = existingRunId ? await dbGetRunById(existingRunId) : null;
 
-  for (let attempt = 0; attempt < TX_MAX_RETRIES; attempt += 1) {
-    const txn = await redis.watch(pointerKey, attKey);
-    const [existingRunId, attRaw] = await Promise.all([
-      redis.get(pointerKey),
-      redis.get(attKey),
-    ]);
-    const existing = existingRunId ? await dbGetRunById(existingRunId) : null;
-
-    if (existing && !params.forceNew && existing.status !== 'finished') {
-      await txn.unwatch();
-      return { kind: 'existing', run: existing };
-    }
-
-    if (existing && params.forceNew && existing.status !== 'finished') {
-      await txn.unwatch();
-      if (params.onRetireExistingRun) {
-        await params.onRetireExistingRun(existing);
-        continue;
-      }
-    }
-
-    const currentAttempts = Number(attRaw ?? 0);
-    const nextAttempt =
-      (Number.isFinite(currentAttempts) && currentAttempts >= 0
-        ? currentAttempts
-        : 0) + 1;
-    const candidateRun: StoredRunState = {
-      ...params.buildNewRun(nextAttempt, nextAttempt === 1),
-      revision: 1,
-    };
-
-    try {
-      await txn.multi();
-      await txn.set(
-        runRecordKey(candidateRun.runId),
-        JSON.stringify(candidateRun),
-      );
-      await txn.set(pointerKey, candidateRun.runId);
-      await txn.set(attKey, String(nextAttempt));
-      const results = await txn.exec();
-      if (!isTxAborted(results, 3)) {
-        return { kind: 'created', run: candidateRun };
-      }
-    } catch (err) {
-      await txn.discard().catch(() => undefined);
-      if (!isWatchConflictError(err)) {
-        throw err;
-      }
-    }
+  if (existing && !params.forceNew && existing.status !== 'finished') {
+    await txn.unwatch();
+    return { kind: 'existing', run: existing };
   }
 
-  throw new Error('Could not claim daily gauntlet run due to high contention');
+  if (
+    existing &&
+    params.forceNew &&
+    existing.status !== 'finished' &&
+    params.onRetireExistingRun
+  ) {
+    await txn.unwatch();
+    await params.onRetireExistingRun(existing);
+    return null;
+  }
+
+  const currentAttempts = Number(attRaw ?? 0);
+  const nextAttempt =
+    (Number.isFinite(currentAttempts) && currentAttempts >= 0
+      ? currentAttempts
+      : 0) + 1;
+  const candidateRun: StoredRunState = {
+    ...params.buildNewRun(nextAttempt, nextAttempt === 1),
+    revision: 1,
+  };
+
+  try {
+    await txn.multi();
+    await txn.set(
+      runRecordKey(candidateRun.runId),
+      JSON.stringify(candidateRun),
+    );
+    await txn.set(pointerKey, candidateRun.runId);
+    await txn.set(attKey, String(nextAttempt));
+    const results = await txn.exec();
+    return isTxAborted(results, 3)
+      ? null
+      : { kind: 'created', run: candidateRun };
+  } catch (err) {
+    await txn.discard().catch(() => undefined);
+    if (!isWatchConflictError(err)) {
+      throw err;
+    }
+    return null;
+  }
 }
 
 export async function dbRecordStageAttempt(
@@ -449,66 +474,120 @@ async function readLeaderboard(key: string): Promise<StoredLeaderboardEntry[]> {
   }
 }
 
-async function upsertPeriodLeaderboard(
+type LeaderboardMergeResult =
+  | {
+      readonly changed: false;
+      readonly entries: StoredLeaderboardEntry[];
+      readonly matchedCandidate: boolean;
+    }
+  | {
+      readonly changed: true;
+      readonly entries: StoredLeaderboardEntry[];
+      readonly matchedCandidate: boolean;
+    };
+
+function mergeLeaderboardEntry(
+  list: StoredLeaderboardEntry[],
+  candidate: StoredLeaderboardEntry,
+  isFinished: boolean,
+): LeaderboardMergeResult {
+  const existingIdx = list.findIndex(
+    (entry) => entry.playerKey === candidate.playerKey,
+  );
+  if (existingIdx < 0) {
+    list.push(candidate);
+  } else {
+    const existing = list[existingIdx]!;
+    const sameRun =
+      existing.runId !== undefined && existing.runId === candidate.runId;
+    if (compareRuns(candidate, existing) >= 0) {
+      const needsTimestamp =
+        sameRun &&
+        isFinished &&
+        existing.completedAtMs !== candidate.completedAtMs;
+      const needsStage = sameRun && existing.maxStage < candidate.maxStage;
+      if (!needsTimestamp && !needsStage) {
+        return { changed: false, entries: list, matchedCandidate: sameRun };
+      }
+      list[existingIdx] = {
+        ...existing,
+        maxStage: Math.max(existing.maxStage, candidate.maxStage),
+        completedAtMs: needsTimestamp
+          ? candidate.completedAtMs
+          : existing.completedAtMs,
+      };
+    } else {
+      list[existingIdx] = candidate;
+    }
+  }
+
+  list.sort(compareRuns);
+  const trimmed = list.slice(0, LEADERBOARD_LIMIT);
+  const stillIncluded = trimmed.some(
+    (entry) => entry.playerKey === candidate.playerKey,
+  );
+  return {
+    changed: true,
+    entries: trimmed,
+    matchedCandidate: stillIncluded,
+  };
+}
+
+async function tryUpsertPeriodLeaderboardOnce(
   key: string,
   candidate: StoredLeaderboardEntry,
   isFinished: boolean,
 ): Promise<{
   readonly entries: StoredLeaderboardEntry[];
   readonly matchedCandidate: boolean;
-}> {
-  for (let attempt = 0; attempt < TX_MAX_RETRIES; attempt += 1) {
-    const txn = await redis.watch(key);
-    const list = await readLeaderboard(key);
-    const existingIdx = list.findIndex(
-      (entry) => entry.playerKey === candidate.playerKey,
-    );
-
-    if (existingIdx >= 0) {
-      const existing = list[existingIdx]!;
-      const sameRunHoldingRank =
-        existing.runId !== undefined && existing.runId === candidate.runId;
-      if (compareRuns(candidate, existing) >= 0) {
-        const needsFinalTimestamp =
-          sameRunHoldingRank &&
-          isFinished &&
-          existing.completedAtMs !== candidate.completedAtMs;
-        const needsStageBump =
-          sameRunHoldingRank && existing.maxStage < candidate.maxStage;
-        if (!needsFinalTimestamp && !needsStageBump) {
-          await txn.unwatch();
-          return {
-            entries: list,
-            matchedCandidate: sameRunHoldingRank,
-          };
-        }
-        list[existingIdx] = {
-          ...existing,
-          maxStage: Math.max(existing.maxStage, candidate.maxStage),
-          completedAtMs: needsFinalTimestamp
-            ? candidate.completedAtMs
-            : existing.completedAtMs,
-        };
-      } else {
-        list[existingIdx] = candidate;
-      }
-    } else {
-      list.push(candidate);
-    }
-
-    list.sort(compareRuns);
-    const trimmed = list.slice(0, LEADERBOARD_LIMIT);
-    const written = await executeWatchedSet(txn, key, JSON.stringify(trimmed));
-    if (written) {
-      const stillIncluded = trimmed.some(
-        (entry) => entry.playerKey === candidate.playerKey,
-      );
-      return { entries: trimmed, matchedCandidate: stillIncluded };
-    }
+} | null> {
+  const txn = await redis.watch(key);
+  const list = await readLeaderboard(key);
+  const merged = mergeLeaderboardEntry(list, candidate, isFinished);
+  if (!merged.changed) {
+    await txn.unwatch();
+    return {
+      entries: merged.entries,
+      matchedCandidate: merged.matchedCandidate,
+    };
   }
+  const written = await executeWatchedSet(
+    txn,
+    key,
+    JSON.stringify(merged.entries),
+  );
+  return written
+    ? { entries: merged.entries, matchedCandidate: merged.matchedCandidate }
+    : null;
+}
 
-  throw new Error(
-    `Could not update leaderboard "${key}" due to high contention`,
+async function upsertPeriodLeaderboard(
+  key: string,
+  candidate: StoredLeaderboardEntry,
+  isFinished: boolean,
+  remainingAttempts = TX_MAX_RETRIES,
+): Promise<{
+  readonly entries: StoredLeaderboardEntry[];
+  readonly matchedCandidate: boolean;
+}> {
+  if (remainingAttempts <= 0) {
+    throw new Error(
+      `Could not update leaderboard "${key}" due to high contention`,
+    );
+  }
+  const committed = await tryUpsertPeriodLeaderboardOnce(
+    key,
+    candidate,
+    isFinished,
+  );
+  if (committed !== null) {
+    return committed;
+  }
+  return upsertPeriodLeaderboard(
+    key,
+    candidate,
+    isFinished,
+    remainingAttempts - 1,
   );
 }
 
